@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AR FX Studio — real-time face &amp; hand camera effects</title>
+  <meta name="description" content="Real-time AR camera effects in your browser: face tracking, hand gestures, 12 effects. All processing stays on your device.">
+  <meta name="theme-color" content="#050505">
+  <meta property="og:title" content="AR FX Studio">
+  <meta property="og:description" content="Real-time face &amp; hand tracked camera effects in the browser, controlled by gestures.">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://storage.googleapis.com" crossorigin>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app" class="is-loading">
+  <main id="stage" aria-label="Camera preview">
+    <canvas id="out" aria-label="Camera output with effects"></canvas>
+    <video id="video" playsinline muted aria-hidden="true"></video>
+    <div id="flash" aria-hidden="true"></div>
+    <div id="gesture-hud" aria-hidden="true"><svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15"/><circle id="hold-ring" class="ring" cx="18" cy="18" r="15"/></svg><span id="gesture-name">—</span></div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <div id="rec-badge" hidden><span class="dot"></span><span id="rec-time">00:00</span></div>
+
+    <section id="idle" class="overlay" aria-labelledby="idle-title">
+      <div class="idle-card glass">
+        <p class="eyebrow">Real-time AR</p>
+        <h1 id="idle-title">AR FX Studio</h1>
+        <p class="lede">Face &amp; hand tracked camera effects, controlled by gestures. Everything runs on your device — no video ever leaves your browser.</p>
+        <div id="idle-error" class="error" role="alert" hidden></div>
+        <div class="idle-actions">
+          <button id="btn-start" class="btn primary" type="button" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10l5-3v10l-5-3M3 7h12v10H3z"/></svg>
+            <span>Start camera</span>
+          </button>
+          <button id="btn-help-idle" class="btn ghost" type="button">Gestures</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <header class="topbar glass">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span>AR FX</span><span class="brand-sub">Studio</span></div>
+    <div class="chips" aria-label="Tracking status">
+      <span class="chip" title="Frames per second"><b id="st-fps">0</b> fps</span>
+      <span class="chip" title="Faces tracked"><i class="dotc" id="st-face-dot"></i>Face <b id="st-face">0</b></span>
+      <span class="chip" title="Hands tracked"><i class="dotc" id="st-hand-dot"></i>Hands <b id="st-hand">0</b></span>
+      <span class="chip hide-sm" title="Inference backend" id="st-delegate">—</span>
+    </div>
+    <div class="top-actions">
+      <button id="btn-gestures" class="icon-btn" type="button" aria-pressed="true" title="Gesture controls (G)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 13V5.5a1.5 1.5 0 013 0V12m0-1V4.5a1.5 1.5 0 013 0V12m0-6.5a1.5 1.5 0 013 0V14a7 7 0 01-7 7h-.5a6 6 0 01-5-2.7L3.6 15a1.6 1.6 0 012.6-1.8L8 15"/></svg>
+        <span class="sr-only">Gesture controls</span>
+      </button>
+      <button id="btn-help" class="icon-btn" type="button" title="Gesture guide (?)" aria-controls="help" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 114 2c-1 .7-1.5 1.2-1.5 2.5M12 17h.01"/></svg>
+        <span class="sr-only">Gesture guide</span>
+      </button>
+      <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen (F)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        <span class="sr-only">Fullscreen</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="dock glass" aria-label="Effects and camera controls">
+    <div class="dock-row active-row">
+      <button id="btn-active-toggle" class="switch" type="button" role="switch" aria-checked="false" title="Turn the selected effect on/off"><span></span></button>
+      <div class="active-name"><span id="active-glyph" aria-hidden="true">◎</span><span id="active-name">Neon Face</span></div>
+      <label class="slider-wrap"><span class="sr-only">Intensity</span>
+        <input id="intensity" type="range" min="0" max="100" step="1" value="60" aria-label="Effect intensity">
+        <output id="intensity-val">60%</output>
+      </label>
+      <label class="color-wrap" title="Effect color"><span class="sr-only">Effect color</span><input id="color" type="color" value="#ff2bd6" aria-label="Effect color"></label>
+      <button id="btn-settings" class="icon-btn" type="button" title="Effect settings (S)" aria-controls="settings" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+        <span class="sr-only">Effect settings</span>
+      </button>
+    </div>
+    <div id="library" class="library" role="toolbar" aria-label="Effects library"></div>
+    <div class="dock-row controls">
+      <button id="btn-camera" class="ctl" type="button" title="Start / stop camera">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10l5-3v10l-5-3M3 7h12v10H3z"/></svg><span id="camera-label">Start</span>
+      </button>
+      <button id="btn-switch" class="ctl" type="button" title="Switch camera" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><path d="M9.5 13a2.5 2.5 0 014.6-1.3M14.5 13a2.5 2.5 0 01-4.6 1.3M14 10v2h-2M10 16v-2h2"/></svg><span>Flip</span>
+      </button>
+      <button id="btn-shot" class="shutter" type="button" title="Take screenshot (P)" disabled><span class="sr-only">Screenshot</span></button>
+      <button id="btn-record" class="ctl" type="button" title="Record video (R)" disabled aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/></svg><span id="record-label">Record</span>
+      </button>
+      <button id="btn-clear" class="ctl" type="button" title="Turn all effects off">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"/></svg><span>Clear</span>
+      </button>
+    </div>
+  </section>
+
+  <aside id="settings" class="sheet glass" aria-labelledby="settings-title" hidden>
+    <div class="sheet-head"><h2 id="settings-title">Effect settings</h2><button class="icon-btn" type="button" data-close="settings" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg><span class="sr-only">Close</span></button></div>
+    <div class="sheet-body">
+      <div class="fx-title"><span id="settings-glyph" aria-hidden="true"></span><div><strong id="settings-name"></strong><small id="settings-state"></small></div></div>
+      <form id="settings-form" autocomplete="off" onsubmit="return false"></form>
+      <button id="btn-reset-fx" class="btn ghost small" type="button">Reset this effect</button>
+      <hr class="divider">
+      <h3>Studio</h3>
+      <div class="field"><label for="opt-mirror">Mirror preview</label><select id="opt-mirror"><option value="auto">Auto (front camera)</option><option value="on">Always</option><option value="off">Never</option></select></div>
+      <div class="field"><label for="opt-perf">Performance</label><select id="opt-perf"><option value="auto">Auto (adaptive resolution)</option><option value="high">High quality</option><option value="low">Battery saver</option></select></div>
+      <div class="field row"><label for="opt-debug">Show tracking landmarks</label><input id="opt-debug" type="checkbox" class="tgl"></div>
+      <div class="field row"><label for="opt-gestures">Gesture controls</label><input id="opt-gestures" type="checkbox" class="tgl"></div>
+      <p class="hint" id="perf-info"></p>
+      <button id="btn-reset-all" class="btn ghost small danger" type="button">Reset all settings</button>
+    </div>
+  </aside>
+
+  <aside id="help" class="sheet glass" aria-labelledby="help-title" hidden>
+    <div class="sheet-head"><h2 id="help-title">Gesture guide</h2><button class="icon-btn" type="button" data-close="help" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg><span class="sr-only">Close</span></button></div>
+    <div class="sheet-body">
+      <p class="hint">Hold a gesture for about half a second in front of the camera. A ring fills while it is being recognised.</p>
+      <table class="gesture-table">
+        <thead><tr><th scope="col">Gesture</th><th scope="col">Action</th></tr></thead>
+        <tbody>
+          <tr><td><span class="g">🖐</span> Open palm</td><td>Turn the selected effect on / off</td></tr>
+          <tr><td><span class="g">✊</span> Closed fist</td><td>Trigger an animation burst</td></tr>
+          <tr><td><span class="g">✌️</span> Two fingers</td><td>Next effect</td></tr>
+          <tr><td><span class="g">🤟</span> Three fingers</td><td>Previous effect</td></tr>
+          <tr><td><span class="g">🤏</span> Pinch + move up/down</td><td>Raise / lower intensity</td></tr>
+          <tr><td><span class="g">🙌</span> Both hands</td><td>Cycle the effect color</td></tr>
+        </tbody>
+      </table>
+      <h3>Keyboard</h3>
+      <p class="hint"><kbd>←</kbd>/<kbd>→</kbd> select effect · <kbd>Space</kbd> toggle · <kbd>↑</kbd>/<kbd>↓</kbd> intensity · <kbd>B</kbd> burst · <kbd>P</kbd> screenshot · <kbd>R</kbd> record · <kbd>F</kbd> fullscreen · <kbd>G</kbd> gestures · <kbd>S</kbd> settings</p>
+      <h3>Tips</h3>
+      <p class="hint">Stack several effects at once: tap an effect to select it and turn it on, tap it again to turn it off. Good, even lighting improves tracking. Video and photos are processed locally and never uploaded.</p>
+    </div>
+  </aside>
+
+  <div id="loader" class="overlay" role="dialog" aria-modal="true" aria-labelledby="loader-title">
+    <div class="loader-card glass">
+      <div class="loader-logo" aria-hidden="true"><span></span></div>
+      <h2 id="loader-title">Preparing AR engine</h2>
+      <ol class="stages">
+        <li data-stage="wasm"><div class="st-head"><span>Vision runtime (WASM)</span><small>Waiting</small></div><div class="bar"><i></i></div></li>
+        <li data-stage="face"><div class="st-head"><span>Face landmark model</span><small>Waiting</small></div><div class="bar"><i></i></div></li>
+        <li data-stage="hand"><div class="st-head"><span>Hand landmark model</span><small>Waiting</small></div><div class="bar"><i></i></div></li>
+      </ol>
+      <div id="loader-error" class="error" role="alert" hidden></div>
+      <button id="btn-retry-load" class="btn primary" type="button" hidden>Retry</button>
+    </div>
+  </div>
+</div>
+<noscript><p class="noscript">AR FX Studio needs JavaScript to run.</p></noscript>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
