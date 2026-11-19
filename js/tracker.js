@@ -64,7 +64,7 @@ export class Tracker {
         fetchWithProgress(MODELS.face, (p, g, t) => onStage('face', p * 0.9, fmt(g, t))),
         fetchWithProgress(MODELS.hand, (p, g, t) => onStage('hand', p * 0.9, fmt(g, t))),
       ]);
-    } catch (e) { throw Object.assign(new Error('Could not download the face/hand models. ' + e.message), { code: 'model', cause: e }); }
+    } catch (e) { throw Object.assign(new Error(`Could not download the face/hand models (${String(e.message || e).replace(/\.$/, '')}).`), { code: 'model', cause: e }); }
 
     onStage('face', 0.92, 'Initialising face tracker');
     this.face = await this._create(mod.FaceLandmarker, faceBuf, (d) => ({
