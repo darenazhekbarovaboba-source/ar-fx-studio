@@ -468,6 +468,7 @@ export const EFFECTS = [
 
 /** Test helper: read a reusable offscreen buffer by name. */
 export const getBuffer = (name) => _bufs[name]?.c || null;
+export { buf, grab, pixelate, hsl, RNG };
 export const EFFECT_MAP = Object.fromEntries(EFFECTS.map((f) => [f.id, f]));
 /** Render order: pixel-processing effects first, overlays last. */
 export const RENDER_ORDER = ['mirror', 'blur', 'pixelate', 'eyePixel', 'glitch', 'colorSplit', 'colorFlash', 'static', 'neon', 'scanner', 'geometric', 'laser'];

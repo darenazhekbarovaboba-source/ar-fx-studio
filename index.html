@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>AR FX Studio — real-time face &amp; hand camera effects</title>
-  <meta name="description" content="Real-time AR camera effects in your browser: face tracking, hand gestures, 12 effects. All processing stays on your device.">
+  <title>AR FX Studio — Hand Portal &amp; real-time face/hand camera effects</title>
+  <meta name="description" content="Real-time AR camera effects in your browser: frame your face with your hands to open a portal, pinch to pull a static ribbon, plus 12 face and hand tracked effects. All processing stays on your device.">
   <meta name="theme-color" content="#050505">
   <meta property="og:title" content="AR FX Studio">
   <meta property="og:description" content="Real-time face &amp; hand tracked camera effects in the browser, controlled by gestures.">
@@ -27,7 +27,7 @@
       <div class="idle-card glass">
         <p class="eyebrow">Real-time AR</p>
         <h1 id="idle-title">AR FX Studio</h1>
-        <p class="lede">Face &amp; hand tracked camera effects, controlled by gestures. Everything runs on your device — no video ever leaves your browser.</p>
+        <p class="lede">Frame your face with both hands to open a <strong>Hand Portal</strong>, drop and re-frame to switch the fill, pinch with both hands to pull a static ribbon. Everything runs on your device — no video ever leaves your browser.</p>
         <div id="idle-error" class="error" role="alert" hidden></div>
         <div class="idle-actions">
           <button id="btn-start" class="btn primary" type="button" disabled>
@@ -78,7 +78,14 @@
         <span class="sr-only">Effect settings</span>
       </button>
     </div>
-    <div id="library" class="library" role="toolbar" aria-label="Effects library"></div>
+    <div class="lib-wrap">
+      <div class="tabs" role="tablist" aria-label="Mode">
+        <button id="tab-portal" class="tab on" type="button" role="tab" aria-selected="true" aria-controls="portal-lib" title="Hand Portal (T)"><span aria-hidden="true">⬚</span>Portal</button>
+        <button id="tab-fx" class="tab" type="button" role="tab" aria-selected="false" aria-controls="library" tabindex="-1" title="Classic effects (T)"><span aria-hidden="true">✦</span>Effects</button>
+      </div>
+      <div id="portal-lib" class="library" role="toolbar" aria-label="Portal fills"></div>
+      <div id="library" class="library" role="toolbar" aria-label="Effects library" hidden></div>
+    </div>
     <div class="dock-row controls">
       <button id="btn-camera" class="ctl" type="button" title="Start / stop camera">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10l5-3v10l-5-3M3 7h12v10H3z"/></svg><span id="camera-label">Start</span>
@@ -118,6 +125,18 @@
   <aside id="help" class="sheet glass" aria-labelledby="help-title" hidden>
     <div class="sheet-head"><h2 id="help-title">Gesture guide</h2><button class="icon-btn" type="button" data-close="help" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg><span class="sr-only">Close</span></button></div>
     <div class="sheet-body">
+      <h3>Hand Portal (Portal tab)</h3>
+      <table class="gesture-table">
+        <thead><tr><th scope="col">Do this</th><th scope="col">You get</th></tr></thead>
+        <tbody>
+          <tr><td><span class="g">🫷🫸</span> Frame your face: both index fingers up, thumbs in (two “L”s)</td><td>A portal between your index and thumb tips (Magnify, Pixel, Red…)</td></tr>
+          <tr><td><span class="g">↻</span> Drop or open your hands, then frame again</td><td>Next portal fill (Magnify → Pixel → Red)</td></tr>
+          <tr><td><span class="g">🤏🤏</span> Pinch with both hands near your eyes, then pull apart</td><td>Colourful static ribbon between your fingers</td></tr>
+          <tr><td><span class="g">🙂</span> No hands in view</td><td>Blue Face (colour in settings)</td></tr>
+        </tbody>
+      </table>
+      <p class="hint">Tap a fill to pick it directly; <kbd>1</kbd>–<kbd>7</kbd> or <kbd>←</kbd>/<kbd>→</kbd> on a keyboard. <kbd>T</kbd> switches between Portal and Effects.</p>
+      <h3>Effects tab gestures</h3>
       <p class="hint">Hold a gesture for about half a second in front of the camera. A ring fills while it is being recognised.</p>
       <table class="gesture-table">
         <thead><tr><th scope="col">Gesture</th><th scope="col">Action</th></tr></thead>
@@ -131,7 +150,7 @@
         </tbody>
       </table>
       <h3>Keyboard</h3>
-      <p class="hint"><kbd>←</kbd>/<kbd>→</kbd> select effect · <kbd>Space</kbd> toggle · <kbd>↑</kbd>/<kbd>↓</kbd> intensity · <kbd>B</kbd> burst · <kbd>P</kbd> screenshot · <kbd>R</kbd> record · <kbd>F</kbd> fullscreen · <kbd>G</kbd> gestures · <kbd>S</kbd> settings</p>
+      <p class="hint"><kbd>T</kbd> Portal / Effects tab · <kbd>←</kbd>/<kbd>→</kbd> select fill or effect · <kbd>1</kbd>–<kbd>7</kbd> portal fill · <kbd>Space</kbd> toggle · <kbd>↑</kbd>/<kbd>↓</kbd> intensity · <kbd>B</kbd> burst · <kbd>P</kbd> screenshot · <kbd>R</kbd> record · <kbd>F</kbd> fullscreen · <kbd>G</kbd> gestures · <kbd>S</kbd> settings</p>
       <h3>Tips</h3>
       <p class="hint">Stack several effects at once: tap an effect to select it and turn it on, tap it again to turn it off. Good, even lighting improves tracking. Video and photos are processed locally and never uploaded.</p>
     </div>

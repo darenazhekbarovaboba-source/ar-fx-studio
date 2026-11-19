@@ -5,6 +5,9 @@ import { Face, IDX } from './face.js';
 import { EFFECTS, EFFECT_MAP, RENDER_ORDER, defaultSettings, FILTER_OK, getBuffer } from './effects.js';
 import { GestureController, GESTURE_LABELS, classifyHand, classifyFrame } from './gestures.js';
 import { loadState, saveState, saveNow } from './store.js';
+import { PortalController, PORTAL_MODES, PORTAL_DEF, MODE_IDS, portalDefaults, ribbonGeometry, orderQuad, isSelfIntersecting } from './portal.js';
+import { renderPortal, renderBlueFace, renderRibbon, quadBox } from './portalfx.js';
+const PORTAL_MAP = Object.fromEntries(PORTAL_MODES.map((m) => [m.id, m]));
 
 const $ = (s) => document.querySelector(s);
 const app = $('#app'), canvas = $('#out'), video = $('#video');
@@ -24,6 +27,11 @@ const face = faces[0];
 const vmap = { vw: 1280, vh: 720, sx: 0, sy: 0, sw: 1280, sh: 720, k: 1, W: 2, H: 2, mirror: true };
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)');
 const gestures = new GestureController();
+const portal = new PortalController();
+portal.setMode(state.portalMode); portal.cycle = state.settings.portal.cycle; portal.setSmoothing(state.settings.portal.smooth);
+// canvas-space portal geometry, reused every frame
+const PQ = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }], PP = [{ x: 0, y: 0 }, { x: 0, y: 0 }];
+const RIB = new Float32Array(4 * 25), EYE = { x: 0, y: 0 }, _ia = {}, _ib = {};
 
 const rt = {
   ready: false, running: false, raf: 0, W: 0, H: 0, scale: 1,
@@ -32,6 +40,7 @@ const rt = {
   recorder: null, recChunks: [], recStart: 0, recTimer: 0, mirror: true, gpuFailing: false,
   pinchBase: 0, detectMs: 0, errors: [], fxErrors: new Set(), uiTick: 0,
   faceN: 0, faceLms: [], captureFull: false, sheetReturn: null, vw: 0, vh: 0,
+  testHands: null, view: 'none',
 };
 
 /* ------------------------------------------------------------------ debug */
@@ -41,6 +50,8 @@ const fx = (window.__fx = {
   renderScale: 1, size: [0, 0], enabled: [], active: state.active, camera: {}, frames: 0,
   lastScreenshot: null, lastRecording: null, recording: false, fullscreen: false, errors: rt.errors,
   filterSupported: FILTER_OK, classifyHand, classifyFrame,
+  portal: { tab: state.mode, on: state.portalOn, state: 'none', view: 'none', mode: state.portalMode, quad: null, pinch: null, stretch: 1, forms: 0, cycles: 0 },
+  portalLog: [], portalModes: MODE_IDS,
 });
 Object.defineProperty(fx, 'reducedMotion', { get: () => REDUCED.matches });
 
@@ -216,7 +227,7 @@ function updatePerfInfo() {
 function startLoop() { if (!rt.raf) { rt.lastT = performance.now(); rt.fpsSince = rt.lastT; rt.fpsFrames = 0; rt.raf = requestAnimationFrame(loop); } }
 function stopLoop() { cancelAnimationFrame(rt.raf); rt.raf = 0; }
 function needsFace() {
-  if (state.debug) return true;
+  if (state.debug || portalActive()) return true;
   for (const id of enabled) { const f = EFFECT_MAP[id]; if (f.needsFace || (id === 'glitch' && state.settings.glitch.area === 'face') || state.settings[id].area === 'face') return true; }
   return false;
 }
@@ -257,15 +268,18 @@ function detect(now) {
       } else if (now - rt.faceSeenAt > 200) { rt.faceOk = false; rt.faceN = 0; fx.faceCount = 0; }
     } catch (e) { handleDetectError('face', e); }
   }
-  const handEvery = state.perf === 'low' ? 3 : 2;
-  if ((state.gestures || state.debug) && rt.frameNo % handEvery === 0) {
+  // Hand Portal needs hands every frame; classic gestures are debounced so every 2nd/3rd frame is enough
+  const pa = portalActive(), wantHands = pa || state.gestures || state.debug;
+  const handEvery = pa ? 1 : state.perf === 'low' ? 3 : 2;
+  if (wantHands && rt.frameNo % handEvery === 0) {
     try {
-      const r = tracker.detectHands(video);
-      rt.hands = r?.landmarks || []; fx.handCount = rt.hands.length;
-      if (state.gestures) for (const ev of gestures.update(rt.hands, now)) onGesture(ev);
-      fx.gesture = gestures.current;
+      const r = rt.testHands ? null : tracker.detectHands(video);
+      rt.hands = rt.testHands || r?.landmarks || []; fx.handCount = rt.hands.length;
+      if (pa) updatePortal(now);
+      else if (state.gestures) for (const ev of gestures.update(rt.hands, now)) onGesture(ev);
+      fx.gesture = pa ? null : gestures.current;
     } catch (e) { handleDetectError('hand', e); }
-  } else if (!state.gestures && !state.debug) { rt.hands = []; fx.handCount = 0; fx.gesture = null; }
+  } else if (!wantHands) { rt.hands = []; fx.handCount = 0; fx.gesture = null; }
   rt.detectMs = fx.detectMs = +(performance.now() - t0).toFixed(1);
 }
 async function handleDetectError(key, e) {
@@ -306,7 +320,63 @@ function renderEffects(ids, t, dt) {
 function draw(t, dt) {
   drawVideo();
   renderEffects(enabled, t, dt);
+  drawPortal();
   if (state.debug) drawDebug();
+}
+
+/* ------------------------------------------------------------------ hand portal */
+function portalActive() { return state.mode === 'portal' && state.portalOn; }
+function updatePortal(now) {
+  const res = portal.update(rt.hands, now, (video.videoWidth || 16) / (video.videoHeight || 9));
+  if (res.switched) {
+    state.portalMode = portal.mode; persist(); renderPortalLib(); renderActive();
+    fx.portalLog.push({ mode: portal.mode, via: 'reframe', at: Date.now() }); if (fx.portalLog.length > 50) fx.portalLog.shift();
+    toast(`${PORTAL_MAP[portal.mode].glyph} ${PORTAL_MAP[portal.mode].name} portal`, 900);
+  }
+}
+function setPortalMode(id, via = 'tap') {
+  if (!PORTAL_MAP[id]) return;
+  portal.setMode(id); state.portalMode = id; persist(); renderPortalLib(); renderActive();
+  fx.portalLog.push({ mode: id, via, at: Date.now() }); if (fx.portalLog.length > 50) fx.portalLog.shift();
+}
+/** Map the controller's normalized-video geometry into canvas space (mirror + crop aware). */
+function mapPortal() {
+  if (portal.quad) for (let i = 0; i < 4; i++) { PQ[i].x = X(portal.quad[i]); PQ[i].y = Y(portal.quad[i]); }
+  if (portal.pinch) for (let i = 0; i < 2; i++) { PP[i].x = X(portal.pinch[i]); PP[i].y = Y(portal.pinch[i]); }
+}
+/** Ribbon width & eye anchor: the band covers brows → lower lids, as in the reference. */
+function ribbonParams() {
+  const L = Math.hypot(PP[1].x - PP[0].x, PP[1].y - PP[0].y);
+  if (rt.faceOk) {
+    const a = face.irisCenter('R', _ia), b = face.irisCenter('L', _ib);
+    EYE.x = (a.x + b.x) / 2; EYE.y = (a.y + b.y) / 2;
+    return { eye: EYE, band: Math.max(8, face.h * 0.2) };
+  }
+  return { eye: null, band: Math.max(8, (0.22 * L) / Math.max(1, portal.stretch)) };
+}
+function drawPortal() {
+  const P = fx.portal;
+  P.tab = state.mode; P.on = state.portalOn; P.mode = portal.mode; P.forms = portal.forms; P.cycles = portal.cycles; P.raw = portal.raw;
+  if (!portalActive()) { P.state = P.view = rt.view = 'off'; P.quad = P.pinch = null; return; }
+  const s = state.settings.portal, st = portal.state;
+  let view = 'none';
+  mapPortal();
+  try {
+    if (st === 'portal' && portal.quad) {
+      renderPortal(ctx, PQ, portal.mode, s, env); view = 'portal';
+    } else if (st === 'ribbon' && portal.pinch && s.ribbon) {
+      const rp = ribbonParams();
+      ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24 }, RIB);
+      renderRibbon(ctx, RIB, rp.band, portal.stretch, s, env); view = 'ribbon'; P.band = +rp.band.toFixed(1);
+    } else if (st === 'none' && s.blueFace && rt.faceOk) {
+      for (let i = 0; i < rt.faceN; i++) renderBlueFace(ctx, faces[i], s, env);
+      view = 'blueface';
+    }
+  } catch (e) { if (!rt.fxErrors.has('portal')) { rt.fxErrors.add('portal'); logError('portal', e); } }
+  finally { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none'; ctx.shadowBlur = 0; }
+  rt.view = view; P.state = st; P.view = view; P.stretch = +portal.stretch.toFixed(3);
+  P.quad = portal.quad ? PQ.map((p) => [+p.x.toFixed(1), +p.y.toFixed(1)]) : null;
+  P.pinch = portal.pinch ? PP.map((p) => [+p.x.toFixed(1), +p.y.toFixed(1)]) : null;
 }
 const BONES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]];
 const X = (p) => { const x = (p.x * vmap.vw - vmap.sx) * vmap.k; return rt.mirror ? rt.W - x : x; };
@@ -332,8 +402,16 @@ function updateChips(force) {
   $('#st-face-dot').classList.toggle('on', rt.running && rt.faceOk);
   $('#st-hand-dot').classList.toggle('on', rt.running && fx.handCount > 0);
 }
+const VIEW_LABEL = { ribbon: '░ Static ribbon', blueface: '◉ Blue face' };
 function updateGestureHud(now) {
   const hud = $('#gesture-hud');
+  if (portalActive()) {
+    const label = rt.view === 'portal' ? `${PORTAL_MAP[portal.mode].glyph} ${PORTAL_MAP[portal.mode].name} portal` : VIEW_LABEL[rt.view];
+    hud.classList.toggle('show', !!label); hud.classList.add('portal-hud');
+    if (label) { const el = $('#gesture-name'); if (el.textContent !== label) el.textContent = label; }
+    return;
+  }
+  hud.classList.remove('portal-hud');
   const show = state.gestures && rt.hands.length > 0 && gestures.current;
   hud.classList.toggle('show', !!show);
   if (show) {
@@ -361,7 +439,39 @@ function selectRelative(step) {
 }
 function setSetting(id, key, value) {
   state.settings[id][key] = value; persist();
-  if (id === state.active) renderActive();
+  if (id === 'portal') { if (key === 'cycle') portal.cycle = value; if (key === 'smooth') portal.setSmoothing(value); }
+  if (id === cur().id) renderActive();
+}
+/** The definition shown in the dock / settings: the Hand Portal on the Portal tab, else the selected effect. */
+function cur() { return state.mode === 'portal' ? PORTAL_DEF : EFFECT_MAP[state.active]; }
+function isOn(id) { return id === 'portal' ? state.portalOn : enabled.has(id); }
+function setPortalOn(on) { state.portalOn = on; persist(); if (!on) { portal.reset(); } renderActive(); renderPortalLib(); if (!$('#settings').hidden) renderSettings(); }
+function setTab(mode) {
+  if (!['portal', 'fx'].includes(mode)) return;
+  state.mode = mode; persist(); portal.reset(); gestures.reset();
+  for (const [id, m] of [['#tab-portal', 'portal'], ['#tab-fx', 'fx']]) { const b = $(id); b.setAttribute('aria-selected', String(m === mode)); b.classList.toggle('on', m === mode); b.tabIndex = m === mode ? 0 : -1; }
+  $('#portal-lib').hidden = mode !== 'portal'; $('#library').hidden = mode !== 'fx';
+  app.classList.toggle('mode-portal', mode === 'portal');
+  renderActive(); renderPortalLib(); renderLibrary(); if (!$('#settings').hidden) renderSettings();
+  fx.portal.tab = mode;
+}
+function renderPortalLib() {
+  const lib = $('#portal-lib');
+  if (!lib.children.length) {
+    for (const m of PORTAL_MODES) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'fx'; b.dataset.id = m.id; b.title = `${m.name} portal`;
+      b.innerHTML = `<span class="fx-glyph" aria-hidden="true">${m.glyph}</span><span class="fx-name">${m.name}</span><i class="fx-dot" aria-hidden="true"></i>`;
+      b.addEventListener('click', () => { setPortalMode(m.id); if (!state.portalOn) setPortalOn(true); });
+      lib.appendChild(b);
+    }
+  }
+  for (const b of lib.children) {
+    const sel = b.dataset.id === portal.mode;
+    b.classList.toggle('selected', sel); b.classList.toggle('on', sel && state.portalOn);
+    b.setAttribute('aria-pressed', String(sel));
+    b.setAttribute('aria-label', `${PORTAL_MAP[b.dataset.id].name} portal fill${sel ? ', selected' : ''}`);
+  }
 }
 function triggerBurst() { rt.burst = 1; rt.burstStart = performance.now() / 1000; fx.lastBurst = Date.now(); }
 const PALETTE = ['#ff2bd6', '#2b9bff', '#20f0a8', '#ffd21f', '#ff4b1f', '#a46bff', '#ffffff', '#ff0040'];
@@ -431,23 +541,25 @@ function renderLibrary() {
   if (sel && renderLibrary._last !== state.active) { renderLibrary._last = state.active; sel.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); }
 }
 function renderActive() {
-  const f = EFFECT_MAP[state.active], s = state.settings[f.id];
-  $('#active-name').textContent = f.name; $('#active-glyph').textContent = f.glyph;
-  const sw = $('#btn-active-toggle'); sw.setAttribute('aria-checked', String(enabled.has(f.id))); sw.setAttribute('aria-label', `${f.name} on/off`);
+  const f = cur(), s = state.settings[f.id];
+  $('#active-name').textContent = f.id === 'portal' ? `Portal · ${PORTAL_MAP[portal.mode].name}` : f.name; $('#active-glyph').textContent = f.glyph;
+  const sw = $('#btn-active-toggle'); sw.setAttribute('aria-checked', String(isOn(f.id))); sw.setAttribute('aria-label', `${f.name} on/off`);
   const ip = f.params.find((p) => p.key === 'intensity');
   const inp = $('#intensity'); inp.value = s.intensity; $('#intensity-val').textContent = `${s.intensity}${ip.unit}`;
   $('#intensity-label').textContent = ip.label;
   inp.setAttribute('aria-label', `${f.name} – ${ip.label}`); inp.title = ip.label;
   const col = $('#color');
   col.disabled = !f.hasColor; col.parentElement.classList.toggle('disabled', !f.hasColor);
-  col.parentElement.title = f.hasColor ? 'Effect color' : `${f.name} has no color setting`;
+  col.parentElement.title = f.id === 'portal' ? 'Blue Face color' : f.hasColor ? 'Effect color' : `${f.name} has no color setting`;
   if (f.hasColor) { col.value = s.color; col.parentElement.style.setProperty('--swatch', s.color); }
   else col.parentElement.style.setProperty('--swatch', '#2a2a2a');
 }
 function renderSettings() {
-  const f = EFFECT_MAP[state.active], s = state.settings[f.id], form = $('#settings-form');
+  const f = cur(), s = state.settings[f.id], form = $('#settings-form');
   $('#settings-name').textContent = f.name; $('#settings-glyph').textContent = f.glyph;
-  $('#settings-state').textContent = enabled.has(f.id) ? 'On' : 'Off — tap the switch or the effect to turn it on';
+  $('#settings-state').textContent = f.id === 'portal' ? (state.portalOn ? `On · ${PORTAL_MAP[portal.mode].name} fill` : 'Off — tap the switch to turn it on')
+    : enabled.has(f.id) ? 'On' : 'Off — tap the switch or the effect to turn it on';
+  $('#btn-reset-fx').textContent = f.id === 'portal' ? 'Reset Hand Portal' : 'Reset this effect';
   form.innerHTML = '';
   for (const p of f.params) {
     const id = `set-${f.id}-${p.key}`, row = document.createElement('div');
@@ -588,15 +700,24 @@ function bind() {
   $('#btn-help-idle').addEventListener('click', (e) => openSheet('help', kbOpener(e)));
   $('#btn-settings').addEventListener('click', (e) => toggleSheet('settings', kbOpener(e)));
   document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => closeSheet(b.dataset.close)));
-  $('#btn-active-toggle').addEventListener('click', () => toggleEffect());
-  $('#intensity').addEventListener('input', (e) => { const v = +e.target.value; $('#intensity-val').textContent = `${v}${EFFECT_MAP[state.active].params[0].unit}`; setSetting(state.active, 'intensity', v); syncSettingsField('intensity', v); });
-  $('#color').addEventListener('input', (e) => { setSetting(state.active, 'color', e.target.value); syncSettingsField('color', e.target.value); });
-  $('#btn-reset-fx').addEventListener('click', () => { state.settings[state.active] = defaultSettings(state.active); persist(); renderActive(); renderSettings(); toast('Effect reset'); });
+  $('#btn-active-toggle').addEventListener('click', () => (state.mode === 'portal' ? setPortalOn(!state.portalOn) : toggleEffect()));
+  $('#intensity').addEventListener('input', (e) => { const v = +e.target.value, f = cur(); $('#intensity-val').textContent = `${v}${f.params[0].unit}`; setSetting(f.id, 'intensity', v); syncSettingsField('intensity', v); });
+  $('#color').addEventListener('input', (e) => { setSetting(cur().id, 'color', e.target.value); syncSettingsField('color', e.target.value); });
+  $('#btn-reset-fx').addEventListener('click', () => {
+    const id = cur().id; state.settings[id] = id === 'portal' ? portalDefaults() : defaultSettings(id);
+    if (id === 'portal') { portal.cycle = state.settings.portal.cycle; portal.setSmoothing(state.settings.portal.smooth); }
+    persist(); renderActive(); renderSettings(); toast(id === 'portal' ? 'Hand Portal reset' : 'Effect reset');
+  });
+  $('#tab-portal').addEventListener('click', () => setTab('portal'));
+  $('#tab-fx').addEventListener('click', () => setTab('fx'));
+  $('.tabs').addEventListener('keydown', (e) => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); setTab(state.mode === 'portal' ? 'fx' : 'portal'); $(state.mode === 'portal' ? '#tab-portal' : '#tab-fx').focus(); } });
   $('#btn-reset-all').addEventListener('click', () => {
     if (!confirm('Reset every effect and studio setting to the defaults?')) return;
     for (const f of EFFECTS) state.settings[f.id] = defaultSettings(f.id);
-    enabled.clear(); enabled.add('neon'); state.active = 'neon'; state.mirror = 'auto'; state.perf = 'auto'; state.debug = false; state.fit = 'auto'; state.faces = 2;
-    setGestures(true); saveNow(state); applyStudioControls(); renderLibrary(); renderActive(); renderSettings(); toast('All settings reset');
+    state.settings.portal = portalDefaults(); portal.cycle = 'video'; portal.setSmoothing(50); portal.setMode('magnify');
+    enabled.clear(); state.active = 'neon'; state.mirror = 'auto'; state.perf = 'auto'; state.debug = false; state.fit = 'auto'; state.faces = 2;
+    state.portalOn = true; state.portalMode = 'magnify';
+    setGestures(true); saveNow(state); applyStudioControls(); setTab('portal'); renderSettings(); toast('All settings reset');
   });
   $('#opt-mirror').addEventListener('change', (e) => { state.mirror = e.target.value; persist(); rt.mirror = state.mirror === 'on' || (state.mirror === 'auto' && camera.facing !== 'environment'); if (rt.running) sizeCanvas(true); });
   $('#opt-perf').addEventListener('change', (e) => { state.perf = e.target.value; persist(); if (state.perf === 'auto') rt.scale = 1; sizeCanvas(true); });
@@ -623,11 +744,13 @@ function bind() {
     const tag = (document.activeElement?.tagName || '').toLowerCase();
     if (['input', 'select', 'textarea'].includes(tag) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (tag === 'button' && (e.key === ' ' || e.key === 'Enter')) return;
-    const k = e.key.toLowerCase();
-    if (k === 'arrowright') selectRelative(1);
-    else if (k === 'arrowleft') selectRelative(-1);
-    else if (k === ' ') { e.preventDefault(); toggleEffect(); }
-    else if (k === 'arrowup' || k === 'arrowdown') { e.preventDefault(); const s = state.settings[state.active]; setSetting(state.active, 'intensity', Math.max(0, Math.min(100, s.intensity + (k === 'arrowup' ? 5 : -5)))); }
+    const k = e.key.toLowerCase(), P = state.mode === 'portal';
+    if (k === 'arrowright') P ? setPortalMode(portal.next(1), 'key') : selectRelative(1);
+    else if (k === 'arrowleft') P ? setPortalMode(portal.next(-1), 'key') : selectRelative(-1);
+    else if (k === ' ') { e.preventDefault(); P ? setPortalOn(!state.portalOn) : toggleEffect(); }
+    else if (k === 'arrowup' || k === 'arrowdown') { e.preventDefault(); const f = cur(), s = state.settings[f.id]; setSetting(f.id, 'intensity', Math.max(0, Math.min(100, s.intensity + (k === 'arrowup' ? 5 : -5)))); }
+    else if (k === 't') setTab(P ? 'fx' : 'portal');
+    else if (P && k >= '1' && k <= String(MODE_IDS.length)) setPortalMode(MODE_IDS[+k - 1], 'key');
     else if (k === 'b') { triggerBurst(); toast('✊ Animation burst'); }
     else if (k === 'p') screenshot();
     else if (k === 'r') (rt.recorder ? stopRecording() : startRecording());
@@ -647,12 +770,13 @@ function bind() {
 }
 function syncSettingsField(key, v) {
   if ($('#settings').hidden) return;
-  const el = document.getElementById(`set-${state.active}-${key}`); if (!el) return;
+  const el = document.getElementById(`set-${cur().id}-${key}`); if (!el) return;
   el.value = v; const out = el.parentElement.querySelector('output');
-  const unit = EFFECT_MAP[state.active].params.find((p) => p.key === key)?.unit || '';
+  const unit = cur().params.find((p) => p.key === key)?.unit || '';
   if (out) out.textContent = v + unit;
 }
 function applyStudioControls() {
+  setTab(state.mode);
   $('#opt-mirror').value = state.mirror; $('#opt-perf').value = state.perf; $('#opt-debug').checked = state.debug;
   $('#opt-fit').value = state.fit; $('#opt-faces').value = String(state.faces);
   setGestures(state.gestures);
@@ -691,6 +815,86 @@ fx.test = {
     const n = a.length / 4;
     return { id, meanDiff: +(sum / n / 3).toFixed(2), changedRatio: +(changed / n).toFixed(3), rect: [x, y, w, h], errors: [...rt.fxErrors] };
   },
+  /** Feed synthetic hand landmarks instead of the detector (null = back to the camera). */
+  setHands(h) { rt.testHands = h; },
+  /** Render the current frame now and return it as a data URL (same task, so the read-back is reliable). */
+  snapshot(type = 'image/png', q = 0.92) { draw(performance.now() / 1000, 0); return canvas.toDataURL(type, q); },
+  /** canvas px → normalized video coords (inverse of the preview mapping, mirror aware) */
+  toVideo(x, y) { const cx = rt.mirror ? rt.W - x : x; return { x: (cx / vmap.k + vmap.sx) / vmap.vw, y: (y / vmap.k + vmap.sy) / vmap.vh }; },
+  /** 21-point synthetic hand (normalized video coords) whose thumb & index tips sit at t4 / t8. */
+  makeHand(t4, t8, wrist) {
+    const L = (a, b, k) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, z: 0 });
+    const tip = { x: (t4.x + t8.x) / 2, y: (t4.y + t8.y) / 2 }, h = new Array(21);
+    h[0] = { ...wrist, z: 0 };
+    for (let i = 1; i <= 4; i++) h[i] = L(wrist, t4, i / 4.4); h[4] = { ...t4, z: 0 };
+    for (let f = 0; f < 4; f++) { const base = 5 + f * 4, end = f === 0 ? t8 : L(wrist, tip, 0.8 - f * 0.08); for (let j = 0; j < 4; j++) h[base + j] = L(wrist, end, 0.45 + j * 0.183); }
+    h[8] = { ...t8, z: 0 };
+    return h;
+  },
+  /** Two synthetic pinching hands at eye level, `spread` face-widths from the eye midpoint. */
+  pinchHandsAtEyes(spread = 0.6) {
+    if (!rt.faceOk) return null;
+    const a = face.irisCenter('R', {}), b = face.irisCenter('L', {}), ex = (a.x + b.x) / 2, ey = (a.y + b.y) / 2, w = face.w;
+    const mk = (side) => {
+      const px = ex + side * spread * w, py = ey, g = w * 0.025;
+      const t4 = fx.test.toVideo(px - side * g, py + g * 0.3), t8 = fx.test.toVideo(px + side * g * 0.2, py - g * 0.3), wr = fx.test.toVideo(px + side * w * 0.3, py + w * 0.55);
+      return fx.test.makeHand(t4, t8, wr);
+    };
+    return [mk(-1), mk(1)];
+  },
+  /** Two synthetic "L" hands framing the face (index tips above, thumb tips below the eyes). */
+  frameHandsAroundFace(scale = 1) {
+    if (!rt.faceOk) return null;
+    const w = face.w * scale, cx = face.cx, cy = face.cy;
+    const mk = (side) => {
+      const t8 = fx.test.toVideo(cx + side * w * 0.55, cy - w * 0.45), t4 = fx.test.toVideo(cx + side * w * 0.2, cy + w * 0.35), wr = fx.test.toVideo(cx + side * w * 1.1, cy + w * 0.4);
+      return fx.test.makeHand(t4, t8, wr);
+    };
+    return [mk(-1), mk(1)];
+  },
+  setTab, setPortalMode, setPortalOn,
+  portalController: portal,
+  portalLogic: { orderQuad, isSelfIntersecting },
+  /**
+   * Render the current camera frame with and without one Hand Portal output and measure the
+   * change inside vs. outside the region (quad polygon, ribbon polygon or face oval).
+   * kind: a portal fill id, 'ribbon' or 'blueface'.
+   */
+  diffPortal(kind, override = null) {
+    const t = performance.now() / 1000, s = override ? { ...state.settings.portal, ...override } : state.settings.portal;
+    drawVideo(); renderEffects(enabled, t, 1 / 30); mapPortal();
+    let region = null, drawFn = null, box;
+    if (MODE_IDS.includes(kind)) {
+      if (!portal.quad) return { error: 'no quad', state: portal.state };
+      region = (c) => { c.beginPath(); c.moveTo(PQ[0].x, PQ[0].y); for (let i = 1; i < 4; i++) c.lineTo(PQ[i].x, PQ[i].y); c.closePath(); };
+      drawFn = () => renderPortal(ctx, PQ, kind, s, env); box = quadBox(PQ, rt.W, rt.H, 12);
+    } else if (kind === 'ribbon') {
+      if (!portal.pinch) return { error: 'no pinch', state: portal.state };
+      const rp = ribbonParams(); ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24 }, RIB);
+      region = (c) => { c.beginPath(); c.moveTo(RIB[0], RIB[1]); for (let i = 1; i < RIB.length / 2; i++) c.lineTo(RIB[i * 2], RIB[i * 2 + 1]); c.closePath(); };
+      drawFn = () => renderRibbon(ctx, RIB, rp.band, portal.stretch, s, env);
+      const pts = []; for (let i = 0; i < RIB.length / 2; i++) pts.push({ x: RIB[i * 2], y: RIB[i * 2 + 1] }); box = quadBox(pts, rt.W, rt.H, 12);
+    } else if (kind === 'blueface') {
+      if (!rt.faceOk) return { error: 'no face' };
+      region = (c) => face.path(c, IDX.oval, true, 1.0);
+      drawFn = () => renderBlueFace(ctx, face, s, env); box = quadBox([{ x: face.minX, y: face.minY }, { x: face.maxX, y: face.maxY }], rt.W, rt.H, 12);
+    } else return { error: 'unknown kind' };
+    if (!box) return { error: 'empty region' };
+    const { x, y, w, h } = box;
+    const a = ctx.getImageData(x, y, w, h).data;
+    drawFn(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none'; ctx.shadowBlur = 0;
+    const b = ctx.getImageData(x, y, w, h).data;
+    const m = document.createElement('canvas'); m.width = w; m.height = h; const mc = m.getContext('2d');
+    mc.translate(-x, -y); region(mc); mc.fillStyle = '#fff'; mc.fill(); const mask = mc.getImageData(0, 0, w, h).data;
+    let inN = 0, inC = 0, outN = 0, outC = 0, inSum = 0, rS = 0, gS = 0, bS = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+      if (mask[i + 3] > 200) { inN++; inSum += d; if (d > 30) inC++; rS += b[i]; gS += b[i + 1]; bS += b[i + 2]; }
+      else if (mask[i + 3] === 0) { outN++; if (d > 30) outC++; }
+    }
+    return { kind, inside: +(inC / Math.max(1, inN)).toFixed(3), outside: +(outC / Math.max(1, outN)).toFixed(3), meanDiff: +(inSum / Math.max(1, inN) / 3).toFixed(1),
+      meanRGB: [Math.round(rS / Math.max(1, inN)), Math.round(gS / Math.max(1, inN)), Math.round(bS / Math.max(1, inN))], px: inN, rect: [x, y, w, h], errors: [...rt.fxErrors] };
+  },
   setEffects(ids) { enabled.clear(); ids.forEach((i) => enabled.add(i)); persist(); renderLibrary(); renderActive(); },
   burst: triggerBurst,
   gesture: (g) => onGesture({ type: 'gesture', gesture: g }),
@@ -699,5 +903,5 @@ fx.test = {
 };
 
 /* ------------------------------------------------------------------ boot */
-bind(); applyStudioControls(); renderLibrary(); renderActive(); syncDebug(); measureChrome(); syncFs();
+bind(); applyStudioControls(); renderLibrary(); renderPortalLib(); renderActive(); syncDebug(); measureChrome(); syncFs();
 loadEngine();
