@@ -11,11 +11,13 @@ Plain HTML5 / CSS3 / JavaScript (ES modules). No frameworks, no build step, no s
 | What you do | What you get |
 |---|---|
 | **Frame your face** with both hands: index fingers up, thumbs pointing in (two “L” shapes) | A **portal**: a quad whose 4 corners are your two index fingertips and two thumb tips, filled with the current fill |
-| **Drop or open your hands, then frame again** | The **next fill** — Magnify → Pixel → Red, as hard cuts (or all 7 fills, or off — see settings) |
-| **Pinch** with both hands near your eyes and **pull apart** | A **static ribbon** between the two pinch points: starts as a visor across the eyes, stretches as you pull and tapers toward the hand that pulls away (the other end stays square), filled with fast saturated TV static |
-| **No hands in view** | **Blue Face** — a bright semi-transparent tint masked to the face mesh (forehead, cheeks, nose, chin, lips, eyes); background and clothes untouched; colour selectable |
+| **Drop your hands (~0.6 s), close the frame (thumbs back to your index fingers), or re-frame somewhere clearly different** | The **next fill** — Magnify → Pixel → Red, as hard cuts (or all 7 fills, or off — see settings). Tracking flicker shorter than ~0.5 s (a hand lost for a moment, a brief mis-read as a pinch, a collapsed thumb reading) keeps the portal and the fill |
+| **Pinch** with both hands near your eyes and **pull apart** | A **static ribbon** between the two pinch points: starts as a fine, greenish static visor across the eyes (also when a pinching hand sits at the very frame edge, and through ~0.9 s tracking loss), stretches as you pull and tapers toward the hand that pulls away (the other end stays square), filled with fast saturated TV static |
+| **Neither a frame nor a pinch** (no hands, or idle hands in view) | **Blue Face** — a bright semi-transparent tint masked to the face mesh (forehead, cheeks, nose, chin, lips, eyes); background and clothes untouched; colour selectable |
 
-Portal fills: **Magnify** (crisp 1.4–1.6× zoom centred on the frame, natural exposure, subtle bulge, thin glowing light-yellow 2–4 px border), **Pixel** (big mosaic), **Red** (semi-transparent red tint), plus bonus fills that reuse the effect engine: **Glitch** (RGB glitch), **Static**, **Rainbow** (colour split stripes), **Invert**.
+With a face in view the frame has to be around it (a frame held on the chest is ignored), and a collapsed "triangle" reading where both thumbs land on one point is rejected while the last good trapezoid is held.
+
+Portal fills: **Magnify** (crisp 1.4–1.6× zoom centred on the frame, natural exposure, subtle bulge, thin near-white 1.5–3 px edge with a faint warm glow), **Pixel** (big mosaic), **Red** (face-centred deep red that warms to orange / yellow / yellow-green toward the frame's sides, like the reference), plus bonus fills that reuse the effect engine: **Glitch** (RGB glitch), **Static**, **Rainbow** (colour split stripes), **Invert**.
 
 How it works:
 

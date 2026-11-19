@@ -21,25 +21,31 @@ const STATIC_PALETTE = [
   [0, 0, 0, 38], [255, 255, 255, 13], [255, 0, 214, 15], [0, 238, 255, 13], [255, 236, 0, 14],
   [0, 255, 70, 5], [255, 30, 40, 3], [40, 60, 255, 3],
 ];
-let TILES = null;
-export function staticTiles() {
-  if (TILES) return TILES;
-  const N = 128, total = STATIC_PALETTE.reduce((s, c) => s + c[3], 0);
-  RNG.seed(4242); TILES = [];
+// the unstretched visor in the reference is a fine, greenish/violet RGB noise (less black, less contrast)
+const VISOR_PALETTE = [
+  [24, 26, 24, 9], [225, 230, 225, 7], [70, 215, 95, 22], [150, 70, 215, 15], [20, 190, 210, 14],
+  [225, 85, 175, 11], [235, 215, 70, 9], [50, 95, 235, 10], [120, 160, 120, 8],
+];
+const TILESETS = {};
+export function staticTiles(kind = 'chunky') {
+  if (TILESETS[kind]) return TILESETS[kind];
+  const PAL = kind === 'visor' ? VISOR_PALETTE : STATIC_PALETTE;
+  const N = 128, total = PAL.reduce((s, c) => s + c[3], 0);
+  RNG.seed(kind === 'visor' ? 777 : 4242); const TILES = TILESETS[kind] = [];
   for (let k = 0; k < 8; k++) {
     const c = document.createElement('canvas'); c.width = c.height = N;
     const x = c.getContext('2d'), img = x.createImageData(N, N), d = img.data;
     for (let i = 0; i < d.length; i += 4) {
-      let r = RNG.next() * total, j = 0; while (r > STATIC_PALETTE[j][3]) { r -= STATIC_PALETTE[j][3]; j++; }
-      const col = STATIC_PALETTE[j]; d[i] = col[0]; d[i + 1] = col[1]; d[i + 2] = col[2]; d[i + 3] = 255;
+      let r = RNG.next() * total, j = 0; while (r > PAL[j][3]) { r -= PAL[j][3]; j++; }
+      const col = PAL[j]; d[i] = col[0]; d[i + 1] = col[1]; d[i + 2] = col[2]; d[i + 3] = 255;
     }
     x.putImageData(img, 0, 0); TILES.push({ c, pat: null });
   }
   return TILES;
 }
 /** Fill the current clip (bounding box r) with animated colourful static, `cell` px per noise cell. */
-function fillStatic(ctx, r, cell, t, alpha = 1, tears = true) {
-  const T = staticTiles(), tick = Math.floor(t * 30);
+function fillStatic(ctx, r, cell, t, alpha = 1, tears = true, kind = 'chunky') {
+  const T = staticTiles(kind), tick = Math.floor(t * 30);
   const tile = T[tick % T.length]; if (!tile.pat) tile.pat = ctx.createPattern(tile.c, 'repeat');
   RNG.seed(tick * 977 + 3);
   const prev = ctx.imageSmoothingEnabled; ctx.imageSmoothingEnabled = false;
@@ -91,8 +97,13 @@ export function renderPortal(ctx, q, mode, s, e) {
     pixelate(ctx, r, Math.max(6, Math.round(e.W * (0.012 + 0.05 * i))));
   } else if (mode === 'red') {
     // overlay keeps the picture readable: darks turn deep red, lights glow orange-red
-    ctx.globalCompositeOperation = 'overlay'; ctx.fillStyle = '#ff2000'; ctx.globalAlpha = 0.55 + 0.35 * i; ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = '#ff1a10'; ctx.globalAlpha = 0.05 + 0.15 * i; ctx.fillRect(r.x, r.y, r.w, r.h);
+    // like the reference: the face goes deep red, the frame's sides warm to orange/yellow and yellow-green.
+    // 'color' keeps the picture's luminance (bright wall → yellow, skin → red); 'overlay' adds the richness.
+    const fc = e.faceC || { x: cx, y: cy }, R = Math.max(r.w, r.h) * 0.62;
+    const g = ctx.createRadialGradient(fc.x, fc.y, 0, fc.x, fc.y, R);
+    g.addColorStop(0, '#ff1e0e'); g.addColorStop(0.32, '#ff2a0c'); g.addColorStop(0.5, '#ff7a00'); g.addColorStop(0.7, '#ffcc00'); g.addColorStop(1, '#9fdc10');
+    ctx.globalCompositeOperation = 'color'; ctx.fillStyle = g; ctx.globalAlpha = 0.7 + 0.3 * i; ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.3 + 0.35 * i; ctx.fillRect(r.x, r.y, r.w, r.h);
   } else if (mode === 'glitch') {
     GLITCH_S.intensity = 30 + 70 * i;
     EFFECT_MAP.glitch.render(ctx, null, e, GLITCH_S);
@@ -107,10 +118,10 @@ export function renderPortal(ctx, q, mode, s, e) {
   }
   ctx.restore();
   if (mode === 'magnify' && s.border) {
-    const lw = clamp(e.W * 0.0024, 2, 4);
+    // a thin, near-white edge with a faint warm glow (reference 0.4 s)
+    const lw = clamp(e.W * 0.0016, 1.5, 3);
     ctx.save(); ctx.lineJoin = 'round'; quadPath(ctx, q);
-    ctx.shadowColor = 'rgba(255,240,160,0.9)'; ctx.shadowBlur = lw * 3; ctx.strokeStyle = 'rgba(255,244,190,0.95)'; ctx.lineWidth = lw; ctx.stroke();
-    ctx.shadowBlur = 0; ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = Math.max(1, lw * 0.45); ctx.stroke();
+    ctx.shadowColor = 'rgba(255,248,210,0.55)'; ctx.shadowBlur = lw * 1.6; ctx.strokeStyle = 'rgba(255,252,232,0.96)'; ctx.lineWidth = lw; ctx.stroke();
     ctx.restore();
   }
 }
@@ -138,9 +149,12 @@ export function renderRibbon(ctx, poly, band, stretch, s, e) {
   }
   ctx.closePath(); ctx.clip();
   _r.x = Math.floor(x0); _r.y = Math.floor(y0); _r.w = Math.ceil(x1 - x0) + 1; _r.h = Math.ceil(y1 - y0) + 1;
-  // grain grows as the ribbon is stretched: fine static as a visor, chunky pixels when pulled out
-  const base = Math.max(1.5, band * (0.02 + 0.08 * (s.grain / 100)));
-  const cell = Math.round(base * clamp(1 + (stretch - 1) * 0.5, 1, 2.4));
-  fillStatic(ctx, _r, Math.max(2, cell), e.reduced ? Math.floor(e.t * 4) / 4 : e.t, 1, false);
+  // fine greenish static as a visor (1–2 px cells), cross-fading to chunky saturated pixels as it is pulled out
+  const g = s.grain / 100, t = e.reduced ? Math.floor(e.t * 4) / 4 : e.t;
+  const fine = Math.max(1, Math.round(band * (0.008 + 0.03 * g)));
+  const chunky = Math.max(2, Math.round(band * (0.03 + 0.09 * g) * clamp(0.6 + stretch * 0.5, 1, 2.6)));
+  const mix = clamp((stretch - 1.15) / 0.55, 0, 1);
+  if (mix < 1) fillStatic(ctx, _r, fine, t, 1, false, 'visor');
+  if (mix > 0) fillStatic(ctx, _r, chunky, t, mix, false, 'chunky');
   ctx.restore();
 }

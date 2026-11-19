@@ -51,7 +51,7 @@ const fx = (window.__fx = {
   lastScreenshot: null, lastRecording: null, recording: false, fullscreen: false, errors: rt.errors,
   filterSupported: FILTER_OK, classifyHand, classifyFrame,
   portal: { tab: state.mode, on: state.portalOn, state: 'none', view: 'none', mode: state.portalMode, quad: null, pinch: null, stretch: 1, forms: 0, cycles: 0 },
-  portalLog: [], portalModes: MODE_IDS,
+  portalLog: [], portalStats: { frames: 0, views: {} }, portalModes: MODE_IDS,
 });
 Object.defineProperty(fx, 'reducedMotion', { get: () => REDUCED.matches });
 
@@ -327,10 +327,16 @@ function draw(t, dt) {
 /* ------------------------------------------------------------------ hand portal */
 function portalActive() { return state.mode === 'portal' && state.portalOn; }
 function updatePortal(now) {
-  const res = portal.update(rt.hands, now, (video.videoWidth || 16) / (video.videoHeight || 9));
+  // face boxes (normalized video space): the portal has to frame a face when one is visible
+  let boxes = null;
+  if (rt.faceOk && rt.faceLms) {
+    boxes = [];
+    for (const lm of rt.faceLms) { let x0 = 1, y0 = 1, x1 = 0, y1 = 0; for (const p of lm) { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; } boxes.push({ x0, y0, x1, y1 }); }
+  }
+  const res = portal.update(rt.hands, now, (video.videoWidth || 16) / (video.videoHeight || 9), boxes);
   if (res.switched) {
     state.portalMode = portal.mode; persist(); renderPortalLib(); renderActive();
-    fx.portalLog.push({ mode: portal.mode, via: 'reframe', at: Date.now() }); if (fx.portalLog.length > 50) fx.portalLog.shift();
+    fx.portalLog.push({ mode: portal.mode, via: 'reframe', why: portal.switchWhy, at: Date.now() }); if (fx.portalLog.length > 50) fx.portalLog.shift();
     toast(`${PORTAL_MAP[portal.mode].glyph} ${PORTAL_MAP[portal.mode].name} portal`, 900);
   }
 }
@@ -340,29 +346,35 @@ function setPortalMode(id, via = 'tap') {
   fx.portalLog.push({ mode: id, via, at: Date.now() }); if (fx.portalLog.length > 50) fx.portalLog.shift();
 }
 /** Map the controller's normalized-video geometry into canvas space (mirror + crop aware). */
+const FACE_C = { x: 0, y: 0 };
 function mapPortal() {
+  if (rt.faceOk) { FACE_C.x = face.cx; FACE_C.y = face.cy; env.faceC = FACE_C; } else env.faceC = null;
   if (portal.quad) for (let i = 0; i < 4; i++) { PQ[i].x = X(portal.quad[i]); PQ[i].y = Y(portal.quad[i]); }
   if (portal.pinch) for (let i = 0; i < 2; i++) { PP[i].x = X(portal.pinch[i]); PP[i].y = Y(portal.pinch[i]); }
 }
 /**
- * Ribbon width, eye anchor and taper side. The band covers brows → lower lids (as in the reference);
- * the ribbon tapers toward the hand farther from the face centre (the one pulling away) — or, with no
- * face, toward the hand that moved more since the pinch started. The other end stays square.
+ * Ribbon width, eye anchor and taper side. The band covers brows → lower lids (as in the reference).
+ * The ribbon tapers toward the hand that actually pulled away (moved more since the pinch started);
+ * only when that is not decisive (both still, or both pulled about equally) the hand farther from the
+ * face centre decides. The other end stays square.
  */
 function ribbonParams() {
   const L = Math.hypot(PP[1].x - PP[0].x, PP[1].y - PP[0].y);
   const leftI = PP[0].x <= PP[1].x ? 0 : 1, rightI = 1 - leftI;
+  const m = portal.moved || [0, 0], ml = m[leftI], mr = m[rightI];
+  const decisive = Math.max(ml, mr) > 0.02 && Math.abs(ml - mr) > 0.25 * Math.max(ml, mr);
+  const byMove = mr >= ml ? 'right' : 'left';
   if (rt.faceOk) {
     const a = face.irisCenter('R', _ia), b = face.irisCenter('L', _ib);
     EYE.x = (a.x + b.x) / 2; EYE.y = (a.y + b.y) / 2;
     const dl = Math.hypot(PP[leftI].x - face.cx, PP[leftI].y - face.cy), dr = Math.hypot(PP[rightI].x - face.cx, PP[rightI].y - face.cy);
-    return { eye: EYE, band: Math.max(8, face.h * 0.2), taper: dr >= dl ? 'right' : 'left' };
+    return { eye: EYE, band: Math.max(8, face.h * 0.2), taper: decisive ? byMove : dr >= dl ? 'right' : 'left' };
   }
-  const m = portal.moved || [0, 0];
-  return { eye: null, band: Math.max(8, (0.22 * L) / Math.max(1, portal.stretch)), taper: m[rightI] >= m[leftI] ? 'right' : 'left' };
+  return { eye: null, band: Math.max(8, (0.22 * L) / Math.max(1, portal.stretch)), taper: byMove };
 }
 function drawPortal() {
   const P = fx.portal;
+  P.blue = portal.blue; P.reason = portal.reason;
   P.tab = state.mode; P.on = state.portalOn; P.mode = portal.mode; P.forms = portal.forms; P.cycles = portal.cycles; P.raw = portal.raw;
   if (!portalActive()) { P.state = P.view = rt.view = 'off'; P.quad = P.pinch = null; return; }
   const s = state.settings.portal, st = portal.state;
@@ -376,12 +388,13 @@ function drawPortal() {
       ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24, taper: rp.taper }, RIB);
       renderRibbon(ctx, RIB, rp.band, portal.stretch, s, env); view = 'ribbon'; P.band = +rp.band.toFixed(1); P.taper = rp.taper;
       P.ends = [Math.hypot(RIB[0] - RIB[98], RIB[1] - RIB[99]), Math.hypot(RIB[48] - RIB[50], RIB[49] - RIB[51])].map((v) => +v.toFixed(1));
-    } else if (st === 'none' && s.blueFace && rt.faceOk) {
+    } else if (portal.blue && s.blueFace && rt.faceOk) {
       for (let i = 0; i < rt.faceN; i++) renderBlueFace(ctx, faces[i], s, env);
       view = 'blueface';
     }
   } catch (e) { if (!rt.fxErrors.has('portal')) { rt.fxErrors.add('portal'); logError('portal', e); } }
   finally { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none'; ctx.shadowBlur = 0; }
+  const PS = fx.portalStats; PS.frames++; PS.views[view] = (PS.views[view] || 0) + 1;
   rt.view = view; P.state = st; P.view = view; P.stretch = +portal.stretch.toFixed(3);
   P.quad = portal.quad ? PQ.map((p) => [+p.x.toFixed(1), +p.y.toFixed(1)]) : null;
   P.pinch = portal.pinch ? PP.map((p) => [+p.x.toFixed(1), +p.y.toFixed(1)]) : null;
@@ -550,7 +563,10 @@ function renderLibrary() {
 }
 function renderActive() {
   const f = cur(), s = state.settings[f.id];
-  $('#active-name').textContent = f.id === 'portal' ? `Portal · ${PORTAL_MAP[portal.mode].name}` : f.name; $('#active-glyph').textContent = f.glyph;
+  const an = $('#active-name'), full = f.id === 'portal' ? `Portal · ${PORTAL_MAP[portal.mode].name}` : f.name;
+  if (f.id === 'portal') { an.innerHTML = ''; const pf = document.createElement('span'); pf.className = 'pfx'; pf.textContent = 'Portal · '; an.append(pf, PORTAL_MAP[portal.mode].name); }
+  else an.textContent = f.name;
+  an.title = full; $('#active-glyph').textContent = f.glyph;
   const sw = $('#btn-active-toggle'); sw.setAttribute('aria-checked', String(isOn(f.id))); sw.setAttribute('aria-label', `${f.name} on/off`);
   const ip = f.params.find((p) => p.key === 'intensity');
   const inp = $('#intensity'); inp.value = s.intensity; $('#intensity-val').textContent = `${s.intensity}${ip.unit}`;
@@ -718,6 +734,11 @@ function bind() {
   });
   $('#tab-portal').addEventListener('click', () => setTab('portal'));
   $('#tab-fx').addEventListener('click', () => setTab('fx'));
+  // fade hint on the chip rows until they are scrolled to the end
+  for (const el of [$('#portal-lib'), $('#library')]) {
+    const upd = () => el.classList.toggle('at-end', el.scrollLeft + el.clientWidth >= el.scrollWidth - 4);
+    el.addEventListener('scroll', upd, { passive: true }); addEventListener('resize', upd); new MutationObserver(upd).observe(el, { childList: true, attributes: true, attributeFilter: ['hidden'] }); requestAnimationFrame(upd);
+  }
   $('.tabs').addEventListener('keydown', (e) => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); setTab(state.mode === 'portal' ? 'fx' : 'portal'); $(state.mode === 'portal' ? '#tab-portal' : '#tab-fx').focus(); } });
   $('#btn-reset-all').addEventListener('click', () => {
     if (!confirm('Reset every effect and studio setting to the defaults?')) return;
@@ -842,9 +863,15 @@ fx.test = {
     return h;
   },
   /** Two synthetic pinching hands at eye level, `spread` face-widths from the eye midpoint. */
-  pinchHandsAtEyes(spread = 0.6) {
+  /** Eye midpoint + face width (canvas px) — pass to pinchHandsAtEyes so a pull is measured against a fixed face. */
+  eyeAnchor() {
     if (!rt.faceOk) return null;
-    const a = face.irisCenter('R', {}), b = face.irisCenter('L', {}), ex = (a.x + b.x) / 2, ey = (a.y + b.y) / 2, w = face.w;
+    const a = face.irisCenter('R', {}), b = face.irisCenter('L', {});
+    return { ex: (a.x + b.x) / 2, ey: (a.y + b.y) / 2, w: face.w };
+  },
+  pinchHandsAtEyes(spread = 0.6, anchor = null) {
+    const A = anchor || fx.test.eyeAnchor(); if (!A) return null;
+    const { ex, ey, w } = A;
     const mk = (side) => {
       const px = ex + side * spread * w, py = ey, g = w * 0.025;
       const t4 = fx.test.toVideo(px - side * g, py + g * 0.3), t8 = fx.test.toVideo(px + side * g * 0.2, py - g * 0.3), wr = fx.test.toVideo(px + side * w * 0.3, py + w * 0.55);
@@ -903,7 +930,15 @@ fx.test = {
       else if (mask[i + 3] === 0) { outN++; if (d > 30) outC++; }
     }
     // magnify shows the source region (quad shrunk by the zoom factor around its centroid): its source mean is the exposure reference
-    let srcRGB;
+    let srcRGB, centerRGB;
+    {
+      // centre patch (around the face centre when it is inside the box, else the box centre): for the Red fill's face-centred red
+      const fcx = env.faceC && env.faceC.x > x && env.faceC.x < x + w ? env.faceC.x : x + w / 2, fcy = env.faceC && env.faceC.y > y && env.faceC.y < y + h ? env.faceC.y : y + h / 2;
+      let n = 0; const t3 = [0, 0, 0];
+      for (let yy = Math.max(0, Math.round(fcy - h * 0.12 - y)); yy < Math.min(h, Math.round(fcy + h * 0.12 - y)); yy++)
+        for (let xx = Math.max(0, Math.round(fcx - w * 0.12 - x)); xx < Math.min(w, Math.round(fcx + w * 0.12 - x)); xx++) { const i = (yy * w + xx) * 4; if (mask[i + 3] > 200) { n++; t3[0] += b[i]; t3[1] += b[i + 1]; t3[2] += b[i + 2]; } }
+      centerRGB = n ? t3.map((v) => Math.round(v / n)) : null;
+    }
     if (kind === 'magnify') {
       const zm = 1.4 + 0.2 * (s.intensity / 100); let qx = 0, qy = 0; for (const p of PQ) { qx += p.x / 4; qy += p.y / 4; }
       mc.setTransform(1, 0, 0, 1, 0, 0); mc.clearRect(0, 0, w, h); mc.translate(-x, -y); mc.beginPath();
@@ -913,7 +948,7 @@ fx.test = {
       srcRGB = t3.map((v) => Math.round(v / Math.max(1, n)));
     }
     return { kind, inside: +(inC / Math.max(1, inN)).toFixed(3), outside: +(outC / Math.max(1, outN)).toFixed(3), meanDiff: +(inSum / Math.max(1, inN) / 3).toFixed(1),
-      meanRGB: [Math.round(rS / Math.max(1, inN)), Math.round(gS / Math.max(1, inN)), Math.round(bS / Math.max(1, inN))], baseRGB: [r0, g0, b0].map((v) => Math.round(v / Math.max(1, inN))), px: inN, rect: [x, y, w, h], srcRGB, errors: [...rt.fxErrors] };
+      meanRGB: [Math.round(rS / Math.max(1, inN)), Math.round(gS / Math.max(1, inN)), Math.round(bS / Math.max(1, inN))], baseRGB: [r0, g0, b0].map((v) => Math.round(v / Math.max(1, inN))), px: inN, rect: [x, y, w, h], srcRGB, centerRGB, errors: [...rt.fxErrors] };
   },
   setEffects(ids) { enabled.clear(); ids.forEach((i) => enabled.add(i)); persist(); renderLibrary(); renderActive(); },
   burst: triggerBurst,
