@@ -344,15 +344,22 @@ function mapPortal() {
   if (portal.quad) for (let i = 0; i < 4; i++) { PQ[i].x = X(portal.quad[i]); PQ[i].y = Y(portal.quad[i]); }
   if (portal.pinch) for (let i = 0; i < 2; i++) { PP[i].x = X(portal.pinch[i]); PP[i].y = Y(portal.pinch[i]); }
 }
-/** Ribbon width & eye anchor: the band covers brows → lower lids, as in the reference. */
+/**
+ * Ribbon width, eye anchor and taper side. The band covers brows → lower lids (as in the reference);
+ * the ribbon tapers toward the hand farther from the face centre (the one pulling away) — or, with no
+ * face, toward the hand that moved more since the pinch started. The other end stays square.
+ */
 function ribbonParams() {
   const L = Math.hypot(PP[1].x - PP[0].x, PP[1].y - PP[0].y);
+  const leftI = PP[0].x <= PP[1].x ? 0 : 1, rightI = 1 - leftI;
   if (rt.faceOk) {
     const a = face.irisCenter('R', _ia), b = face.irisCenter('L', _ib);
     EYE.x = (a.x + b.x) / 2; EYE.y = (a.y + b.y) / 2;
-    return { eye: EYE, band: Math.max(8, face.h * 0.2) };
+    const dl = Math.hypot(PP[leftI].x - face.cx, PP[leftI].y - face.cy), dr = Math.hypot(PP[rightI].x - face.cx, PP[rightI].y - face.cy);
+    return { eye: EYE, band: Math.max(8, face.h * 0.2), taper: dr >= dl ? 'right' : 'left' };
   }
-  return { eye: null, band: Math.max(8, (0.22 * L) / Math.max(1, portal.stretch)) };
+  const m = portal.moved || [0, 0];
+  return { eye: null, band: Math.max(8, (0.22 * L) / Math.max(1, portal.stretch)), taper: m[rightI] >= m[leftI] ? 'right' : 'left' };
 }
 function drawPortal() {
   const P = fx.portal;
@@ -366,8 +373,9 @@ function drawPortal() {
       renderPortal(ctx, PQ, portal.mode, s, env); view = 'portal';
     } else if (st === 'ribbon' && portal.pinch && s.ribbon) {
       const rp = ribbonParams();
-      ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24 }, RIB);
-      renderRibbon(ctx, RIB, rp.band, portal.stretch, s, env); view = 'ribbon'; P.band = +rp.band.toFixed(1);
+      ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24, taper: rp.taper }, RIB);
+      renderRibbon(ctx, RIB, rp.band, portal.stretch, s, env); view = 'ribbon'; P.band = +rp.band.toFixed(1); P.taper = rp.taper;
+      P.ends = [Math.hypot(RIB[0] - RIB[98], RIB[1] - RIB[99]), Math.hypot(RIB[48] - RIB[50], RIB[49] - RIB[51])].map((v) => +v.toFixed(1));
     } else if (st === 'none' && s.blueFace && rt.faceOk) {
       for (let i = 0; i < rt.faceN; i++) renderBlueFace(ctx, faces[i], s, env);
       view = 'blueface';
@@ -817,6 +825,8 @@ fx.test = {
   },
   /** Feed synthetic hand landmarks instead of the detector (null = back to the camera). */
   setHands(h) { rt.testHands = h; },
+  /** eye midpoint (canvas px) of the first face, or null */
+  portalEye() { if (!rt.faceOk) return null; const a = face.irisCenter('R', {}), b = face.irisCenter('L', {}); return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; },
   /** Render the current frame now and return it as a data URL (same task, so the read-back is reliable). */
   snapshot(type = 'image/png', q = 0.92) { draw(performance.now() / 1000, 0); return canvas.toDataURL(type, q); },
   /** canvas px → normalized video coords (inverse of the preview mapping, mirror aware) */
@@ -870,7 +880,7 @@ fx.test = {
       drawFn = () => renderPortal(ctx, PQ, kind, s, env); box = quadBox(PQ, rt.W, rt.H, 12);
     } else if (kind === 'ribbon') {
       if (!portal.pinch) return { error: 'no pinch', state: portal.state };
-      const rp = ribbonParams(); ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24 }, RIB);
+      const rp = ribbonParams(); ribbonGeometry(PP[0], PP[1], { eye: rp.eye, band: rp.band, stretch: portal.stretch, n: 24, taper: rp.taper }, RIB);
       region = (c) => { c.beginPath(); c.moveTo(RIB[0], RIB[1]); for (let i = 1; i < RIB.length / 2; i++) c.lineTo(RIB[i * 2], RIB[i * 2 + 1]); c.closePath(); };
       drawFn = () => renderRibbon(ctx, RIB, rp.band, portal.stretch, s, env);
       const pts = []; for (let i = 0; i < RIB.length / 2; i++) pts.push({ x: RIB[i * 2], y: RIB[i * 2 + 1] }); box = quadBox(pts, rt.W, rt.H, 12);
@@ -886,14 +896,24 @@ fx.test = {
     const b = ctx.getImageData(x, y, w, h).data;
     const m = document.createElement('canvas'); m.width = w; m.height = h; const mc = m.getContext('2d');
     mc.translate(-x, -y); region(mc); mc.fillStyle = '#fff'; mc.fill(); const mask = mc.getImageData(0, 0, w, h).data;
-    let inN = 0, inC = 0, outN = 0, outC = 0, inSum = 0, rS = 0, gS = 0, bS = 0;
+    let inN = 0, inC = 0, outN = 0, outC = 0, inSum = 0, rS = 0, gS = 0, bS = 0, r0 = 0, g0 = 0, b0 = 0;
     for (let i = 0; i < a.length; i += 4) {
       const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
-      if (mask[i + 3] > 200) { inN++; inSum += d; if (d > 30) inC++; rS += b[i]; gS += b[i + 1]; bS += b[i + 2]; }
+      if (mask[i + 3] > 200) { inN++; inSum += d; if (d > 30) inC++; rS += b[i]; gS += b[i + 1]; bS += b[i + 2]; r0 += a[i]; g0 += a[i + 1]; b0 += a[i + 2]; }
       else if (mask[i + 3] === 0) { outN++; if (d > 30) outC++; }
     }
+    // magnify shows the source region (quad shrunk by the zoom factor around its centroid): its source mean is the exposure reference
+    let srcRGB;
+    if (kind === 'magnify') {
+      const zm = 1.4 + 0.2 * (s.intensity / 100); let qx = 0, qy = 0; for (const p of PQ) { qx += p.x / 4; qy += p.y / 4; }
+      mc.setTransform(1, 0, 0, 1, 0, 0); mc.clearRect(0, 0, w, h); mc.translate(-x, -y); mc.beginPath();
+      PQ.forEach((p, i) => mc[i ? 'lineTo' : 'moveTo'](qx + (p.x - qx) / zm, qy + (p.y - qy) / zm)); mc.closePath(); mc.fill();
+      const m2 = mc.getImageData(0, 0, w, h).data; let n = 0; const t3 = [0, 0, 0];
+      for (let i = 0; i < a.length; i += 4) if (m2[i + 3] > 200) { n++; t3[0] += a[i]; t3[1] += a[i + 1]; t3[2] += a[i + 2]; }
+      srcRGB = t3.map((v) => Math.round(v / Math.max(1, n)));
+    }
     return { kind, inside: +(inC / Math.max(1, inN)).toFixed(3), outside: +(outC / Math.max(1, outN)).toFixed(3), meanDiff: +(inSum / Math.max(1, inN) / 3).toFixed(1),
-      meanRGB: [Math.round(rS / Math.max(1, inN)), Math.round(gS / Math.max(1, inN)), Math.round(bS / Math.max(1, inN))], px: inN, rect: [x, y, w, h], errors: [...rt.fxErrors] };
+      meanRGB: [Math.round(rS / Math.max(1, inN)), Math.round(gS / Math.max(1, inN)), Math.round(bS / Math.max(1, inN))], baseRGB: [r0, g0, b0].map((v) => Math.round(v / Math.max(1, inN))), px: inN, rect: [x, y, w, h], srcRGB, errors: [...rt.fxErrors] };
   },
   setEffects(ids) { enabled.clear(); ids.forEach((i) => enabled.add(i)); persist(); renderLibrary(); renderActive(); },
   burst: triggerBurst,

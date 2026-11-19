@@ -1,7 +1,7 @@
 // Hand Portal rendering: portal fills inside the hand quad, Blue Face, static ribbon.
 // All drawing reuses offscreen buffers and pre-computed noise tiles (no per-frame canvases).
 import { IDX } from './face.js';
-import { EFFECT_MAP, FILTER_OK, buf, grab, pixelate, hsl, RNG } from './effects.js';
+import { EFFECT_MAP, buf, grab, pixelate, hsl, RNG } from './effects.js';
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const _r = { x: 0, y: 0, w: 0, h: 0 };
@@ -70,26 +70,23 @@ export function renderPortal(ctx, q, mode, s, e) {
   let cx = 0, cy = 0; for (const p of q) { cx += p.x; cy += p.y; } cx /= 4; cy /= 4;
   ctx.save(); quadPath(ctx, q); ctx.clip();
   if (mode === 'magnify') {
-    // magnified + slightly bulged, over-exposed warm light (as in the reference)
-    const m = 1.2 + 0.7 * i;
+    // crisp zoom centred on the quad (1.4x–1.6x), natural exposure, subtle lens bulge in the middle
+    const m = 1.4 + 0.2 * i;
     const sx = cx + (r.x - cx) / m, sy = cy + (r.y - cy) / m, sw = r.w / m, sh = r.h / m;
     const pad = 2, src = grab('ptSrc', ctx.canvas, { x: Math.max(0, sx - pad), y: Math.max(0, sy - pad), w: Math.min(e.W, sw + pad * 2), h: Math.min(e.H, sh + pad * 2) });
     const ox = sx - Math.max(0, sx - pad), oy = sy - Math.max(0, sy - pad);
-    if (FILTER_OK) ctx.filter = `brightness(${(1.1 + 0.25 * i).toFixed(2)}) contrast(1.05) saturate(1.12) sepia(0.1)`;
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(src.c, ox, oy, sw, sh, r.x, r.y, r.w, r.h);
-    // bulge: the centre is magnified a little more, blended in with a soft radial mask
     const rr = Math.min(r.w, r.h) * 0.42;
     if (rr > 8) {
-      const B = buf('ptBulge', rr * 2, rr * 2), b = B.ctx, k = 1.12;
-      b.globalCompositeOperation = 'copy'; b.filter = 'none';
+      const B = buf('ptBulge', rr * 2, rr * 2), b = B.ctx, k = 1.07;
+      b.globalCompositeOperation = 'copy'; b.filter = 'none'; b.imageSmoothingQuality = 'high';
       b.drawImage(src.c, ox + (cx - rr / k - r.x) / m, oy + (cy - rr / k - r.y) / m, (2 * rr) / k / m, (2 * rr) / k / m, 0, 0, rr * 2, rr * 2);
       b.globalCompositeOperation = 'destination-in';
-      const g = b.createRadialGradient(rr, rr, rr * 0.2, rr, rr, rr); g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+      const g = b.createRadialGradient(rr, rr, rr * 0.25, rr, rr, rr); g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
       b.fillStyle = g; b.fillRect(0, 0, rr * 2, rr * 2); b.globalCompositeOperation = 'source-over';
       ctx.drawImage(B.c, 0, 0, rr * 2, rr * 2, cx - rr, cy - rr, rr * 2, rr * 2);
     }
-    ctx.filter = 'none';
-    if (!FILTER_OK) { ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = `rgba(255,236,200,${0.28 + 0.2 * i})`; ctx.fillRect(r.x, r.y, r.w, r.h); }
   } else if (mode === 'pixel') {
     pixelate(ctx, r, Math.max(6, Math.round(e.W * (0.012 + 0.05 * i))));
   } else if (mode === 'red') {
@@ -112,7 +109,7 @@ export function renderPortal(ctx, q, mode, s, e) {
   if (mode === 'magnify' && s.border) {
     const lw = clamp(e.W * 0.0024, 2, 4);
     ctx.save(); ctx.lineJoin = 'round'; quadPath(ctx, q);
-    ctx.shadowColor = 'rgba(255,240,160,0.95)'; ctx.shadowBlur = lw * 5; ctx.strokeStyle = 'rgba(255,244,190,0.95)'; ctx.lineWidth = lw; ctx.stroke();
+    ctx.shadowColor = 'rgba(255,240,160,0.9)'; ctx.shadowBlur = lw * 3; ctx.strokeStyle = 'rgba(255,244,190,0.95)'; ctx.lineWidth = lw; ctx.stroke();
     ctx.shadowBlur = 0; ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = Math.max(1, lw * 0.45); ctx.stroke();
     ctx.restore();
   }

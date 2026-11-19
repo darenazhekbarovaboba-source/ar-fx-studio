@@ -128,6 +128,10 @@ function run(c, hands, t0, t1, step = 33) { let r; for (let t = t0; t <= t1; t +
   for (let t = 333, k = 0; t <= 1500; t += 33, k++) { const d = Math.min(0.2, k * 0.01); r = c.update([pinchHand(0.4 - d, 0.4, -1), pinchHand(0.6 + d, 0.4, 1)], t); }
   eq('pulling apart stretches the ribbon (~3x)', r.stretch > 2.4 && r.stretch < 3.3, true);
   eq('pinch points: one per hand', r.pinch.length, 2);
+  eq('both hands pulled equally → similar displacement', Math.abs(c.moved[0] - c.moved[1]) < 0.02, true);
+  const c2 = new PortalController(); run(c2, [pinchHand(0.4, 0.4, -1), pinchHand(0.6, 0.4, 1)], 0, 300);
+  for (let t = 333, k = 0; t <= 1200; t += 33, k++) c2.update([pinchHand(0.4, 0.4, -1), pinchHand(0.6 + Math.min(0.25, k * 0.012), 0.4, 1)], t);
+  eq('only the right hand pulls away → it is the one that moved', c2.moved[1] > 0.15 && c2.moved[0] < 0.02, true);
   const g = run(c, [Lleft(), Lright()], 1533, 1900);
   eq('ribbon → frame switches to the portal', g.state, 'portal');
 }
@@ -139,17 +143,25 @@ function run(c, hands, t0, t1, step = 33) { let r; for (let t = t0; t <= t1; t +
   eq('unstretched ribbon: ends as wide as the eye band (visor)', near(w0, band, 0.5), true);
   const mid = n / 2, topY = out[mid * 2 + 1], botY = out[(2 * n + 1 - mid) * 2 + 1];
   eq('centre line passes through the eyes', near((topY + botY) / 2, 190, 0.5), true);
-  const s2 = ribbonGeometry(P(100, 200), P(500, 200), { eye: P(300, 200), band, stretch: 2, n });
-  const e2 = Math.hypot(s2[0] - s2[(2 * n + 1) * 2], s2[1] - s2[(2 * n + 1) * 2 + 1]);
-  const m2 = Math.abs(s2[mid * 2 + 1] - s2[(2 * n + 1 - mid) * 2 + 1]);
-  eq('stretched x2: ends taper to half width', near(e2, band / 2, 0.5), true);
-  eq('stretched x2: middle keeps the band width', near(m2, band, 0.5), true);
-  eq('taper floor at 18%', near(ribbonWidth(0, 100, 50), 18, 1e-6), true);
+  const endW = (g, i) => { const j = 2 * n + 1 - i; return Math.hypot(g[i * 2] - g[j * 2], g[i * 2 + 1] - g[j * 2 + 1]); };
+  const s2 = ribbonGeometry(P(100, 200), P(500, 200), { eye: P(300, 200), band, stretch: 2, n, taper: 'right' });
+  eq('taper right (x2): left end stays square at the full band', near(endW(s2, 0), band, 0.5), true);
+  eq('taper right (x2): right end narrows to half', near(endW(s2, n), band / 2, 0.5), true);
+  let mono = true; for (let i = 1; i <= n; i++) if (endW(s2, i) > endW(s2, i - 1) + 1e-6) mono = false;
+  eq('taper right: width shrinks monotonically toward the pulling hand', mono, true);
+  const s3 = ribbonGeometry(P(100, 200), P(500, 200), { eye: P(300, 200), band, stretch: 2, n, taper: 'left' });
+  eq('taper left (x2): right end square, left end half', near(endW(s3, n), band, 0.5) && near(endW(s3, 0), band / 2, 0.5), true);
+  const s4 = ribbonGeometry(P(500, 200), P(100, 200), { band, stretch: 2, n, taper: 'right' });
+  eq("taper side refers to the screen side, whatever the pinch order", endW(s4, n) < endW(s4, 0), true);
+  const sb = ribbonGeometry(P(100, 200), P(500, 200), { eye: P(300, 200), band, stretch: 2, n, taper: 'both' });
+  eq("taper 'both': symmetric ends at half, middle full", near(endW(sb, 0), band / 2, 0.5) && near(endW(sb, n), band / 2, 0.5) && near(endW(sb, n / 2), band, 0.5), true);
+  eq('taper floor at 18%', near(ribbonWidth(1, 100, 50, 'right'), 18, 1e-6), true);
+  eq('unstretched: uniform band (visor)', near(ribbonWidth(1, 100, 1, 'right'), 100, 1e-9) && near(ribbonWidth(0.3, 100, 1, 'left'), 100, 1e-9), true);
   const far = ribbonGeometry(P(100, 200), P(500, 200), { eye: P(300, 600), band, n });
   eq('eye far from the hands → straight ribbon', near((far[mid * 2 + 1] + far[(2 * n + 1 - mid) * 2 + 1]) / 2, 200, 0.5), true);
   const rev = ribbonGeometry(P(500, 200), P(100, 200), { band, n });
   eq('pinch order does not matter (left→right)', rev[0] < rev[n * 2], true);
-  eq('no NaN', [...out, ...s2, ...far].every(Number.isFinite), true);
+  eq('no NaN', [...out, ...s2, ...s3, ...far].every(Number.isFinite), true);
   const off = ribbonGeometry(P(100, 200), P(500, 200), { eye: P(220, 215), band, n: 40 });
   let best = 1e9; for (let i = 0; i <= 40; i++) { const cx = (off[i * 2] + off[(81 - i) * 2]) / 2, cy = (off[i * 2 + 1] + off[(81 - i) * 2 + 1]) / 2; best = Math.min(best, Math.hypot(cx - 220, cy - 215)); }
   eq('off-centre eyes: centre line still passes through them', best < 3, true);

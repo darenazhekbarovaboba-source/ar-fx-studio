@@ -12,10 +12,10 @@ Plain HTML5 / CSS3 / JavaScript (ES modules). No frameworks, no build step, no s
 |---|---|
 | **Frame your face** with both hands: index fingers up, thumbs pointing in (two “L” shapes) | A **portal**: a quad whose 4 corners are your two index fingertips and two thumb tips, filled with the current fill |
 | **Drop or open your hands, then frame again** | The **next fill** — Magnify → Pixel → Red, as hard cuts (or all 7 fills, or off — see settings) |
-| **Pinch** with both hands near your eyes and **pull apart** | A **static ribbon** between the two pinch points: starts as a visor across the eyes, stretches and tapers toward your fingers, filled with fast saturated TV static |
+| **Pinch** with both hands near your eyes and **pull apart** | A **static ribbon** between the two pinch points: starts as a visor across the eyes, stretches as you pull and tapers toward the hand that pulls away (the other end stays square), filled with fast saturated TV static |
 | **No hands in view** | **Blue Face** — a bright semi-transparent tint masked to the face mesh (forehead, cheeks, nose, chin, lips, eyes); background and clothes untouched; colour selectable |
 
-Portal fills: **Magnify** (zoomed, slightly bulged, over-exposed, glowing light-yellow 2–4 px border), **Pixel** (big mosaic), **Red** (semi-transparent red tint), plus bonus fills that reuse the effect engine: **Glitch** (RGB glitch), **Static**, **Rainbow** (colour split stripes), **Invert**.
+Portal fills: **Magnify** (crisp 1.4–1.6× zoom centred on the frame, natural exposure, subtle bulge, thin glowing light-yellow 2–4 px border), **Pixel** (big mosaic), **Red** (semi-transparent red tint), plus bonus fills that reuse the effect engine: **Glitch** (RGB glitch), **Static**, **Rainbow** (colour split stripes), **Invert**.
 
 How it works:
 

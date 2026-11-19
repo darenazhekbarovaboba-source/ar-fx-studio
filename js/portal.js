@@ -92,11 +92,13 @@ class PointFilter {
 /**
  * Static-ribbon outline between two pinch points (canvas px). The centre line is a quadratic
  * curve that passes through the eyes (when they sit between the hands), so the ribbon starts as
- * a visor across the eyes; its width is `band` in the middle and tapers toward the fingers as the
- * hands pull apart (stretch = current length / length when the pinch started).
+ * a visor across the eyes. As the hands pull apart (stretch = current length / length when the
+ * pinch started) it tapers toward ONE end — `taper: 'left' | 'right'` (the hand that pulls away,
+ * as in the reference) — while the other end stays square at the full band width; 'both' tapers
+ * symmetrically. At stretch 1 it is a uniform band.
  * Writes n+1 top-edge then n+1 bottom-edge points into `out` (Float32Array(4*(n+1))).
  */
-export function ribbonGeometry(a, b, { eye = null, band = 40, stretch = 1, n = 24 } = {}, out = new Float32Array(4 * (n + 1))) {
+export function ribbonGeometry(a, b, { eye = null, band = 40, stretch = 1, n = 24, taper = 'right' } = {}, out = new Float32Array(4 * (n + 1))) {
   let p1 = a, p2 = b; if (p1.x > p2.x) { p1 = b; p2 = a; }
   const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2, L = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
   let cx = mx, cy = my, ue = 0.5;
@@ -108,20 +110,24 @@ export function ribbonGeometry(a, b, { eye = null, band = 40, stretch = 1, n = 2
     const ex = lx + w * (eye.x - lx), ey = ly + w * (eye.y - ly), k = 2 * ue * ve;
     cx = (ex - ve * ve * p1.x - ue * ue * p2.x) / k; cy = (ey - ve * ve * p1.y - ue * ue * p2.y) / k;
   }
-  const r = Math.max(0.18, Math.min(1, 1 / Math.max(1e-3, stretch)));
   for (let i = 0; i <= n; i++) {
     const u = i / n, v = 1 - u;
     const x = v * v * p1.x + 2 * v * u * cx + u * u * p2.x, y = v * v * p1.y + 2 * v * u * cy + u * u * p2.y;
     let tx = 2 * v * (cx - p1.x) + 2 * u * (p2.x - cx), ty = 2 * v * (cy - p1.y) + 2 * u * (p2.y - cy);
     const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
-    const s = u < ue ? (ue - u) / ue : (u - ue) / (1 - ue), half = (band * (r + (1 - r) * (1 - s * s))) / 2;
+    const half = ribbonWidth(u, band, stretch, taper, ue) / 2;
     out[i * 2] = x - ty * half; out[i * 2 + 1] = y + tx * half; // top edge (normal = (-ty, tx))
     const j = (2 * n + 1 - i) * 2; out[j] = x + ty * half; out[j + 1] = y - tx * half; // bottom edge, reversed
   }
   return out;
 }
 /** Ribbon width at parameter u (0 = left pinch, 1 = right pinch). */
-export function ribbonWidth(u, band, stretch) { const r = Math.max(0.18, Math.min(1, 1 / Math.max(1e-3, stretch))), s = 2 * u - 1; return band * (r + (1 - r) * (1 - s * s)); }
+export function ribbonWidth(u, band, stretch, taper = 'right', ue = 0.5) {
+  const r = Math.max(0.18, Math.min(1, 1 / Math.max(1e-3, stretch)));
+  if (taper === 'both') { const s = u < ue ? (ue - u) / ue : (u - ue) / (1 - ue); return band * (r + (1 - r) * (1 - s * s)); }
+  const s = taper === 'left' ? 1 - u : u; // 0 at the square end → 1 at the tapered end
+  return band * (1 - (1 - r) * Math.pow(s, 1.3));
+}
 
 /* ---------------------------------------------------------------- state machine */
 /**
@@ -139,7 +145,7 @@ export class PortalController {
     this.GRACE_MS = opts.graceMs ?? 150; this.BREAK_MS = opts.breakMs ?? 150; this.NO_HANDS_MS = opts.noHandsMs ?? 250;
     this.MIN_DWELL_MS = opts.minDwellMs ?? 500;
     this.mode = 'magnify'; this.cycle = 'video'; this.state = 'none';
-    this.quad = null; this.pinch = null; this.stretch = 1; this.forms = 0; this.cycles = 0;
+    this.quad = null; this.pinch = null; this.stretch = 1; this.forms = 0; this.cycles = 0; this.moved = [0, 0]; this.pinchStart = null;
     this.lastPortalAt = -1e9; this.portalEndAt = -1e9; this.lastRibbonAt = -1e9; this.handsAt = -1e9; this.switchAt = -1e9;
     this.ribbonLen0 = 0; this.raw = 'none';
     this.f = Array.from({ length: 6 }, () => new PointFilter());
@@ -210,7 +216,8 @@ export class PortalController {
       const mids = [c.A, c.B].map((h) => ({ x: (h[4].x + h[8].x) / 2, y: (h[4].y + h[8].y) / 2 }));
       for (let i = 0; i < 2; i++) { const p = this.f[4 + i].filter(mids[i], t); this._p[i].x = p.x; this._p[i].y = p.y; }
       const len = dist(this._p[0], this._p[1], aspect);
-      if (!this.ribbonLen0) this.ribbonLen0 = Math.max(len, 1e-3);
+      if (!this.ribbonLen0) { this.ribbonLen0 = Math.max(len, 1e-3); this.pinchStart = [{ ...this._p[0] }, { ...this._p[1] }]; }
+      this.moved = [0, 1].map((i) => dist(this._p[i], this.pinchStart[i], aspect)); // which hand pulled away
       this.stretch = len / this.ribbonLen0;
       this.pinch = this._p; this.state = 'ribbon'; this.lastRibbonAt = now; this.quad = null;
     } else {
