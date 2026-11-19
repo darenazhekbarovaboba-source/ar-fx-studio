@@ -1,6 +1,6 @@
 // Unit tests for the gesture classifier and controller using synthetic landmarks.
 // Run: node tests/gestures.test.mjs
-import { classifyHand, classifyFrame, GestureController, GESTURES } from '../js/gestures.js';
+import { classifyHand, classifyFrame, classifyFrameDetailed, GestureController, GESTURES } from '../js/gestures.js';
 
 /** Build a synthetic right hand (palm facing camera, fingers up). */
 export function makeHand({ thumb = false, index = false, middle = false, ring = false, pinky = false, pinch = false } = {}, ox = 0.5, oy = 0.8, s = 0.2) {
@@ -60,7 +60,15 @@ eq('pointing = no gesture', classifyHand(H.point), null);
 // fist with the thumb resting against the index knuckle must stay a fist, not a pinch
 const fistThumbOnKnuckle = makeHand({}); fistThumbOnKnuckle[4] = { ...fistThumbOnKnuckle[5], x: fistThumbOnKnuckle[5].x + 0.01 }; fistThumbOnKnuckle[8] = { ...fistThumbOnKnuckle[5], y: fistThumbOnKnuckle[5].y + 0.02 };
 eq('fist with thumb on knuckle is not pinch', classifyHand(fistThumbOnKnuckle), GESTURES.FIST);
-eq('both hands', classifyFrame([H.palm, H.fist]), GESTURES.BOTH);
+eq('both hands (two open palms)', classifyFrame([H.palm, H.palm]), GESTURES.BOTH);
+eq('both hands (palm + relaxed/pointing)', classifyFrame([H.palm, H.point]), GESTURES.BOTH);
+eq('two hands: primary hand fist wins', classifyFrame([H.palm, H.fist]), GESTURES.FIST);
+eq('two hands: primary hand two fingers wins', classifyFrame([H.two, H.palm]), GESTURES.TWO);
+eq('two hands: primary hand three fingers wins', classifyFrame([H.point, H.three]), GESTURES.THREE);
+eq('two hands: pinch hand index reported', classifyFrameDetailed([H.palm, H.pinch]).hand, 1);
+eq('two hands: different distinct gestures → both', classifyFrame([H.fist, H.two]), GESTURES.BOTH);
+eq('incomplete landmarks → null', classifyHand(H.palm.slice(0, 10)), null);
+eq('incomplete second hand ignored', classifyFrame([H.fist, H.palm.slice(0, 5)]), GESTURES.FIST);
 eq('no hands', classifyFrame([]), null);
 for (const [k, lm] of Object.entries(H)) {
   eq(`mirror invariant: ${k}`, classifyHand(mirror(lm)), classifyHand(lm));
@@ -91,6 +99,65 @@ const moves = ev.filter((e) => e.type === 'pinch_move');
 eq('pinch_move emitted', moves.length > 5, true);
 eq('pinch upward gives positive dy', moves[moves.length - 1].dy > 0.1, true);
 ev = c.update([], 1300); eq('pinch_end on release', ev.some((e) => e.type === 'pinch_end'), true);
+
+
+// ---- regression: both_hands must not re-fire on 2→1 hand tracking flicker (QA P1)
+{
+  const g = new GestureController();
+  let fires = 0;
+  for (let t = 0; t <= 8000; t += 33) {
+    const drop = (t % 1200) >= 600 && (t % 1200) < 800; // 200 ms dropout to one hand every 1.2 s
+    fires += g.update(drop ? [H.palm] : [H.palm, H.palm], t).filter((e) => e.type === 'gesture' && e.gesture === GESTURES.BOTH).length;
+  }
+  eq('both_hands fires once despite 200 ms 2→1 flicker every 1.2 s (8 s)', fires, 1);
+}
+{
+  const g = new GestureController();
+  let fires = 0;
+  for (let t = 0; t <= 8000; t += 33) {
+    const drop = (t % 1000) < 500; // 500 ms dropout (longer than the old 150 ms release)
+    fires += g.update(drop ? [H.point] : [H.palm, H.palm], t).filter((e) => e.gesture === GESTURES.BOTH && e.type === 'gesture').length;
+  }
+  eq('both_hands fires once with 500 ms dropouts', fires, 1);
+}
+{
+  const g = new GestureController(); const all = [];
+  const run = (hands, a, b) => { for (let t = a; t <= b; t += 33) all.push(...g.update(hands, t).filter((e) => e.type === 'gesture').map((e) => ({ ...e, t }))); };
+  run([H.palm, H.palm], 0, 1500);
+  run([], 1533, 2500);                 // all hands gone > bothReleaseMs (fired at ~400 ms)
+  run([H.palm, H.palm], 2533, 2850);   // back and held, but still inside the 2.5 s per-gesture cooldown
+  eq('both_hands blocked by its own cooldown', all.filter((e) => e.gesture === GESTURES.BOTH).length, 1);
+  run([H.palm, H.palm], 2883, 5000);
+  eq('both_hands re-fires after release + cooldown', all.filter((e) => e.gesture === GESTURES.BOTH).length, 2);
+}
+{
+  const g = new GestureController(); const all = [];
+  const run = (hands, a, b) => { for (let t = a; t <= b; t += 33) all.push(...g.update(hands, t).filter((e) => e.type === 'gesture')); };
+  run([H.palm, H.palm], 0, 900);
+  run([H.palm], 933, 1200);  // brief drop: still latched → no open_palm
+  eq('no one-hand gesture fires during the both-hands latch', all.filter((e) => e.gesture === GESTURES.OPEN_PALM).length, 0);
+  run([H.palm], 1233, 3000); // one hand deliberately held alone → latch ends, palm can fire
+  eq('one-hand gesture works after deliberately dropping a hand', all.filter((e) => e.gesture === GESTURES.OPEN_PALM).length, 1);
+}
+{
+  const g = new GestureController(); const all = [];
+  for (let t = 0; t <= 1500; t += 33) all.push(...g.update([H.palm, H.fist], t).filter((e) => e.type === 'gesture'));
+  eq('fist fires while a second (open) hand is visible', all.map((e) => e.gesture).join(), GESTURES.FIST);
+}
+{
+  const g = new GestureController(); const ev = [];
+  for (let t = 0, i = 0; t <= 1200; t += 33, i++) ev.push(...g.update([H.palm, makeHand({ pinch: true }, 0.5, 0.8 - Math.min(0.2, i * 0.01))], t));
+  const mv = ev.filter((e) => e.type === 'pinch_move');
+  eq('pinch with two hands visible tracks the pinching hand', mv.length > 5 && mv[mv.length - 1].dy > 0.1, true);
+}
+{
+  const g = new GestureController();
+  eq('progress 0 with no candidate', g.progress(0), 0);
+  g.update([H.two], 0); g.update([H.two], 200);
+  eq('progress ~0.5 halfway through hold', Math.abs(g.progress(200) - 0.5) < 0.01, true);
+  g.update([H.two], 450);
+  eq('progress 0 after firing (until release)', g.progress(450), 0);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

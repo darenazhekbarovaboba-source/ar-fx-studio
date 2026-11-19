@@ -38,6 +38,9 @@ function faceRect(F, scale, W, H, pad = 0) {
 function mulberry32(a) {
   return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
+/** Reseedable RNG reused every frame (no per-frame closure allocation). */
+const RNG = { a: 0, seed(v) { this.a = v | 0; return this; }, next() { let a = (this.a = (this.a + 0x6d2b79f5) | 0); let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; } };
+const _bb = [{}, {}], _bar = { x: 0, y: 0, w: 0, h: 0 };
 export function hexToHue(hex) {
   const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex || '');
   if (!m) return 0;
@@ -68,7 +71,8 @@ export const FILTER_OK = (() => {
 
 /* ---------- parameter definitions ---------- */
 const P = {
-  intensity: (def = 60, label = 'Intensity') => ({ key: 'intensity', label, type: 'range', min: 0, max: 100, step: 1, def, unit: '%' }),
+  // the dock shows "%" only for parameters that really are a percentage
+  intensity: (def = 60, label = 'Intensity') => ({ key: 'intensity', label, type: 'range', min: 0, max: 100, step: 1, def, unit: ['Intensity', 'Strength', 'Color strength', 'Noise amount', 'Mesh brightness', 'Glow'].includes(label) ? '%' : '' }),
   opacity: (def = 100) => ({ key: 'opacity', label: 'Opacity', type: 'range', min: 5, max: 100, step: 1, def, unit: '%' }),
   speed: (def = 50, label = 'Speed') => ({ key: 'speed', label, type: 'range', min: 0, max: 100, step: 1, def, unit: '' }),
   anim: (def = 50) => ({ key: 'anim', label: 'Animation speed', type: 'range', min: 0, max: 100, step: 1, def, unit: '' }),
@@ -129,11 +133,11 @@ export const EFFECTS = [
         r = rect(mx - ext, my - ext, ext * 2, ext * 2, e.W, e.H);
       } else {
         let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
-        for (const idx of [IDX.eyeR, IDX.eyeL]) {
-          const b = F.bbox(idx); const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+        for (let q = 0; q < 2; q++) {
+          const b = F.bbox(q ? IDX.eyeL : IDX.eyeR, 0, _bb[q]); const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
           const rx = Math.max(b.w, dist * 0.3) * 0.62 * sz, ry = Math.max(b.h * 2.2, dist * 0.2) * 0.62 * sz;
           ctx.moveTo(cx + rx, cy); ctx.ellipse(cx, cy, rx, ry, ang, 0, TAU);
-          minX = Math.min(minX, cx - rx); maxX = Math.max(maxX, cx + rx); minY = Math.min(minY, cy - rx); maxY = Math.max(maxY, cy + rx);
+          minX = Math.min(minX, cx - rx); maxX = Math.max(maxX, cx + rx); minY = Math.min(minY, cy - Math.max(rx, ry)); maxY = Math.max(maxY, cy + Math.max(rx, ry));
         }
         r = rect(minX, minY, maxX - minX, maxY - minY, e.W, e.H);
       }
@@ -176,7 +180,7 @@ export const EFFECTS = [
     render(ctx, F, e, s) {
       const r = s.area === 'face' && F ? faceRect(F, 1.35, e.W, e.H) : rect(0, 0, e.W, e.H, e.W, e.H); if (!r) return;
       const i = s.intensity / 100, rate = 2 + s.speed / 6;
-      const tick = Math.floor(e.t * rate), rnd = mulberry32(tick * 7919 + 13);
+      const tick = Math.floor(e.t * rate); RNG.seed(tick * 7919 + 13 + Math.round(F ? F.cx : 0)); const rnd = () => RNG.next();
       const active = e.burst > 0.05 || rnd() < 0.35 + s.speed / 160;
       const dx = Math.round((2 + e.W * 0.016 * i) * (active ? 1 + rnd() : 0.6) * (1 + e.burst * 2));
       const src = grab('glA', ctx.canvas, r);
@@ -192,7 +196,8 @@ export const EFFECTS = [
       }
       o.globalCompositeOperation = 'source-over';
       ctx.save(); ctx.globalAlpha = s.opacity / 100;
-      ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+      if (s.area === 'face' && F) F.path(ctx, IDX.oval, true, 1.18); else { ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); }
+      ctx.clip();
       ctx.drawImage(out.c, 0, 0, r.w, r.h, r.x, r.y, r.w, r.h);
       if (active) {
         const n = 2 + Math.round(8 * i);
@@ -334,7 +339,7 @@ export const EFFECTS = [
     params: [P.intensity(40, 'Noise amount'), P.size(25, 'Grain size'), P.speed(70, 'Flicker speed'), P.select('area', 'Area', [['full', 'Full frame'], ['face', 'Face only']], 'full'), P.toggle('scanlines', 'Scanlines', true), P.color('#ffffff'), P.opacity(100)],
     render(ctx, F, e, s) {
       const T = noiseTiles(), rate = 4 + s.speed / 2.5, tick = Math.floor(e.t * rate);
-      const rnd = mulberry32(tick * 31 + 5), tile = T[tick % T.length];
+      RNG.seed(tick * 31 + 5); const rnd = () => RNG.next(); const tile = T[tick % T.length];
       if (!tile.pat) tile.pat = ctx.createPattern(tile.c, 'repeat');
       const a = Math.min(1, (0.05 + 0.75 * s.intensity / 100 + e.burst * 0.6)) * (s.opacity / 100);
       const g = 1 + s.size / 20;
@@ -408,23 +413,37 @@ export const EFFECTS = [
       const r = faceRect(F, 1.3, e.W, e.H); if (!r) return;
       const src = grab('mirSrc', ctx.canvas, r);
       const i = s.intensity / 100, sp = 0.5 + s.speed / 12;
-      ctx.save(); ctx.globalAlpha = s.opacity / 100; F.path(ctx, IDX.oval, true, 1.15); ctx.clip();
+      // Warp into an offscreen buffer (same size as the region), then blend it back through a
+      // soft elliptical mask so there is no hard seam at the edge of the face.
+      const out = buf('mirOut', r.w, r.h), o = out.ctx;
+      const lr = (this.lastRect ||= {}); lr.x = r.x; lr.y = r.y; lr.w = r.w; lr.h = r.h; lr.fy = F.cy - r.y;
+      o.setTransform(1, 0, 0, 1, 0, 0); o.globalCompositeOperation = 'copy';
+      o.drawImage(src.c, 0, 0, r.w, r.h, 0, 0, r.w, r.h);
+      o.globalCompositeOperation = 'source-over';
       if (s.mode === 'mirror') {
-        const axis = F.cx + Math.sin(e.t * sp * 0.4) * F.w * 0.22 * i;
-        const lw = Math.max(1, Math.round(axis - r.x));
-        ctx.beginPath(); ctx.rect(axis, r.y, r.w, r.h); ctx.clip();
-        ctx.translate(axis * 2, 0); ctx.scale(-1, 1);
-        ctx.drawImage(src.c, 0, 0, lw, r.h, r.x, r.y, lw, r.h);
+        const axis = F.cx - r.x + Math.sin(e.t * sp * 0.4) * F.w * 0.22 * i;
+        const lw = Math.max(1, Math.round(axis));
+        o.save(); o.beginPath(); o.rect(axis, 0, r.w, r.h); o.clip();
+        o.translate(axis * 2, 0); o.scale(-1, 1);
+        o.drawImage(src.c, 0, 0, lw, r.h, 0, 0, lw, r.h); o.restore();
       } else {
         const strip = Math.max(2, Math.round(e.H / 240));
         const amp = F.w * 0.14 * i * (1 + e.burst), wl = F.h * (0.12 + 0.6 * s.size / 100);
         const ph = e.t * sp;
         if (s.mode === 'ripple') {
-          for (let x = 0; x < r.w; x += strip) { const dy = amp * 0.7 * Math.sin((x / wl) * TAU + ph); ctx.drawImage(src.c, x, 0, strip + 1, r.h, r.x + x, r.y + dy, strip + 1, r.h); }
+          for (let x = 0; x < r.w; x += strip) { const dy = amp * 0.7 * Math.sin((x / wl) * TAU + ph); o.drawImage(src.c, x, 0, strip + 1, r.h, x, dy, strip + 1, r.h); }
         } else {
-          for (let y = 0; y < r.h; y += strip) { const env = Math.sin((y / r.h) * Math.PI); const dx = amp * env * Math.sin((y / wl) * TAU + ph); ctx.drawImage(src.c, 0, y, r.w, strip + 1, r.x + dx, r.y + y, r.w, strip + 1); }
+          for (let y = 0; y < r.h; y += strip) { const env = Math.sin((y / r.h) * Math.PI); const dx = amp * env * Math.sin((y / wl) * TAU + ph); o.drawImage(src.c, 0, y, r.w, strip + 1, dx, y, r.w, strip + 1); }
         }
       }
+      // feathered elliptical mask (opaque centre → transparent edge), rotated with the head
+      o.globalCompositeOperation = 'destination-in';
+      o.save(); o.translate(F.cx - r.x, F.cy - r.y); o.rotate(F.roll); o.scale(F.w * 0.62, F.h * 0.66);
+      if (!_bufs._mirGrad) { const g = o.createRadialGradient(0, 0, 0, 0, 0, 1); g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(0.72, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)'); _bufs._mirGrad = g; }
+      o.fillStyle = _bufs._mirGrad; o.fillRect(-2, -2, 4, 4); o.restore();
+      o.globalCompositeOperation = 'source-over';
+      ctx.save(); ctx.globalAlpha = s.opacity / 100;
+      ctx.drawImage(out.c, 0, 0, r.w, r.h, r.x, r.y, r.w, r.h);
       ctx.restore();
     },
   },
@@ -436,17 +455,19 @@ export const EFFECTS = [
       let hue = base, a = 0.1 + 0.9 * s.intensity / 100;
       if (s.mode === 'cycle') { hue = base + e.t * sp * 40; a *= 0.7 + 0.3 * Math.abs(Math.sin(e.t * sp)); }
       else if (s.mode === 'rgb') hue = [0, 120, 240][Math.floor(e.t * sp * 1.5) % 3];
-      else if (Math.floor(e.t * sp * 2) % 2) a *= 0.08;
+      else if (!e.reduced && Math.floor(e.t * sp * 2) % 2) a *= 0.08;
       ctx.save();
       if (s.area === 'face') { if (!F) { ctx.restore(); return; } F.path(ctx, IDX.oval, true, 1.1); ctx.clip(); }
       ctx.globalCompositeOperation = s.blend; ctx.globalAlpha = Math.min(1, a) * (s.opacity / 100);
       ctx.fillStyle = hsl(hue, 100, 50); ctx.fillRect(0, 0, e.W, e.H);
-      if (e.burst > 0.02) { ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = e.burst * 0.7; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, e.W, e.H); }
+      if (e.burst > 0.02 && !e.reduced) { ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = e.burst * 0.7; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, e.W, e.H); }
       ctx.restore();
     },
   },
 ];
 
+/** Test helper: read a reusable offscreen buffer by name. */
+export const getBuffer = (name) => _bufs[name]?.c || null;
 export const EFFECT_MAP = Object.fromEntries(EFFECTS.map((f) => [f.id, f]));
 /** Render order: pixel-processing effects first, overlays last. */
 export const RENDER_ORDER = ['mirror', 'blur', 'pixelate', 'eyePixel', 'glitch', 'colorSplit', 'colorFlash', 'static', 'neon', 'scanner', 'geometric', 'laser'];

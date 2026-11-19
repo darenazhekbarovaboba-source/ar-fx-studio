@@ -8,7 +8,9 @@ export function explainCameraError(e) {
   const n = e?.name || '';
   if (n === 'NotAllowedError' || n === 'SecurityError' || n === 'PermissionDeniedError')
     return new CameraError('denied', 'Camera permission was blocked. Allow camera access for this site in your browser settings (the camera icon in the address bar), then press Retry.');
-  if (n === 'NotFoundError' || n === 'DevicesNotFoundError' || n === 'OverconstrainedError')
+  if (n === 'OverconstrainedError' || n === 'ConstraintNotSatisfiedError')
+    return new CameraError('constraints', 'Your camera does not support the requested mode (camera direction or resolution). Press Retry to try again with default settings, or pick another camera.');
+  if (n === 'NotFoundError' || n === 'DevicesNotFoundError')
     return new CameraError('nocam', 'No camera was found. Connect a webcam (or close the app that is using it) and press Retry.');
   if (n === 'NotReadableError' || n === 'TrackStartError' || n === 'AbortError')
     return new CameraError('busy', 'The camera is in use by another app or tab, or the hardware failed to start. Close other apps using the camera and press Retry.');
@@ -30,8 +32,13 @@ export class Camera {
     catch { this.devices = []; }
     return this.devices;
   }
-  /** True when switching makes sense: several cameras, or a mobile device with facingMode support. */
-  get canSwitch() { return this.devices.length > 1; }
+  /** True when switching makes sense: several cameras, or a touch/mobile device with facingMode support. */
+  get canSwitch() {
+    if (this.devices.length > 1) return true;
+    const facing = !!navigator.mediaDevices?.getSupportedConstraints?.().facingMode;
+    const mobile = navigator.userAgentData?.mobile ?? /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    return facing && mobile;
+  }
   async start({ deviceId, facing } = {}) {
     Camera.checkSupport();
     this.stop();
@@ -41,7 +48,7 @@ export class Camera {
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia({ video, audio: false }); }
     catch (e) {
-      if (deviceId && e?.name === 'OverconstrainedError') stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }).catch((e2) => { throw explainCameraError(e2); });
+      if (e?.name === 'OverconstrainedError') stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }).catch((e2) => { throw explainCameraError(e2); });
       else throw explainCameraError(e);
     }
     this.stream = stream;

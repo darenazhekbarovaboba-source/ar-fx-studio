@@ -2,7 +2,7 @@
 import { Tracker, MP_VERSION } from './tracker.js';
 import { Camera, CameraError, explainCameraError } from './camera.js';
 import { Face, IDX } from './face.js';
-import { EFFECTS, EFFECT_MAP, RENDER_ORDER, defaultSettings, FILTER_OK } from './effects.js';
+import { EFFECTS, EFFECT_MAP, RENDER_ORDER, defaultSettings, FILTER_OK, getBuffer } from './effects.js';
 import { GestureController, GESTURE_LABELS, classifyHand, classifyFrame } from './gestures.js';
 import { loadState, saveState, saveNow } from './store.js';
 
@@ -18,7 +18,11 @@ const state = loadState();
 const enabled = new Set(state.enabled);
 const tracker = new Tracker();
 const camera = new Camera(video);
-const face = new Face();
+const faces = [new Face(), new Face(), new Face()];
+const face = faces[0];
+/** video → canvas mapping (crop + scale + mirror), shared by drawing and landmark projection */
+const vmap = { vw: 1280, vh: 720, sx: 0, sy: 0, sw: 1280, sh: 720, k: 1, W: 2, H: 2, mirror: true };
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)');
 const gestures = new GestureController();
 
 const rt = {
@@ -27,6 +31,7 @@ const rt = {
   burst: 0, burstStart: 0, lastT: 0, fps: 0, fpsFrames: 0, fpsSince: 0, lowFor: 0, highFor: 0,
   recorder: null, recChunks: [], recStart: 0, recTimer: 0, mirror: true, gpuFailing: false,
   pinchBase: 0, detectMs: 0, errors: [], fxErrors: new Set(), uiTick: 0,
+  faceN: 0, faceLms: [], captureFull: false, sheetReturn: null, vw: 0, vh: 0,
 };
 
 /* ------------------------------------------------------------------ debug */
@@ -37,6 +42,7 @@ const fx = (window.__fx = {
   lastScreenshot: null, lastRecording: null, recording: false, fullscreen: false, errors: rt.errors,
   filterSupported: FILTER_OK, classifyHand, classifyFrame,
 });
+Object.defineProperty(fx, 'reducedMotion', { get: () => REDUCED.matches });
 
 /* ------------------------------------------------------------------ helpers */
 function toast(msg, ms = 1500) {
@@ -68,7 +74,7 @@ async function loadEngine() {
   $('#loader').hidden = false; $('#loader-error').hidden = true; $('#btn-retry-load').hidden = true;
   $('#loader-title').textContent = 'Preparing AR engine';
   try {
-    await tracker.load(setStage);
+    await tracker.load(setStage, { numFaces: state.faces, timeoutMs: +(new URLSearchParams(location.search).get('timeout')) || undefined });
     rt.ready = fx.ready = true; fx.cpuReason = tracker.cpuReason;
     app.classList.remove('is-loading');
     $('#loader').classList.add('fade'); setTimeout(() => { $('#loader').hidden = true; }, 350);
@@ -150,27 +156,60 @@ async function switchCamera() {
 
 /* ------------------------------------------------------------------ sizing / perf */
 function targetScale() { return state.perf === 'high' ? 1 : state.perf === 'low' ? 0.6 : rt.scale; }
+/** Content box of the stage: the area between the top bar and the dock. */
+function stageBox() {
+  const st = $('#stage'), cs = getComputedStyle(st);
+  return { w: st.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), h: st.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) };
+}
+/** Fill (crop) when the screen and camera orientations disagree, e.g. a portrait phone with a landscape camera. */
+function useFill(box, V) {
+  if (state.fit === 'fill') return true;
+  if (state.fit === 'fit' || !box.w || !box.h) return false;
+  const A = box.w / box.h;
+  return (A < 1 && V > 1.05) || (A > 1 && V < 0.95);
+}
 function sizeCanvas(force) {
   const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
-  const cap = Math.min(1, 1280 / Math.max(vw, vh));
-  const s = cap * targetScale();
-  const W = Math.max(2, Math.round(vw * s)), H = Math.max(2, Math.round(vh * s));
-  if (force || W !== rt.W || H !== rt.H) {
-    if (rt.recorder && !force) return; // keep stream size stable while recording
-    canvas.width = rt.W = W; canvas.height = rt.H = H;
-    fx.size = [W, H]; fx.renderScale = +s.toFixed(2);
-    canvas.style.aspectRatio = `${W} / ${H}`;
-    updatePerfInfo();
+  const box = stageBox(), V = vw / vh;
+  let sx = 0, sy = 0, sw = vw, sh = vh;
+  if (useFill(box, V)) {
+    const A = box.w / box.h;
+    if (A < V) { sw = Math.max(2, Math.round(vh * A)); sx = Math.round((vw - sw) / 2); }
+    else { sh = Math.max(2, Math.round(vw / A)); sy = Math.round((vh - sh) / 2); }
   }
+  // Captures (screenshot / recording) always use the full native camera resolution.
+  const s = rt.captureFull ? 1 : Math.min(1, 1280 / Math.max(sw, sh)) * targetScale();
+  const W = Math.max(2, Math.round(sw * s)), H = Math.max(2, Math.round(sh * s));
+  if (!force && rt.recorder && (W !== rt.W || H !== rt.H)) return; // keep stream size stable while recording
+  Object.assign(vmap, { vw, vh, sx, sy, sw, sh, k: W / sw, W, H, mirror: rt.mirror });
+  if (W !== canvas.width || H !== canvas.height) { canvas.width = W; canvas.height = H; }
+  rt.W = W; rt.H = H;
+  fx.size = [W, H]; fx.renderScale = +(W / sw).toFixed(3); fx.crop = [sx, sy, sw, sh]; fx.fill = sx > 0 || sy > 0;
+  layoutCanvas(); remapFaces(); updatePerfInfo();
+}
+/** CSS size of the canvas: fit its aspect into the stage content box (no letterbox when filling). */
+function layoutCanvas() {
+  const box = stageBox(); if (!box.w || !box.h || !rt.W) return;
+  const a = rt.W / rt.H; let w = box.w, h = w / a;
+  if (h > box.h) { h = box.h; w = h * a; }
+  canvas.style.width = `${Math.floor(w)}px`; canvas.style.height = `${Math.floor(h)}px`;
+}
+function remapFaces() { vmap.mirror = rt.mirror; for (let i = 0; i < rt.faceN; i++) faces[i].update(rt.faceLms[i], vmap); }
+/** Measure the chrome so the stage (preview, idle card) sits between the top bar and the dock. */
+function measureChrome() {
+  const top = $('.topbar').getBoundingClientRect(), dock = $('.dock').getBoundingClientRect();
+  document.documentElement.style.setProperty('--top-h', `${Math.ceil(top.bottom)}px`);
+  document.documentElement.style.setProperty('--dock-h', `${Math.ceil(innerHeight - dock.top)}px`);
+  if (rt.running && !rt.recorder) sizeCanvas(true); else layoutCanvas();
 }
 function adaptPerf(fps) {
-  if (state.perf !== 'auto' || rt.recorder) return;
+  if (state.perf !== 'auto' || rt.recorder || rt.captureFull) return;
   if (fps < 20 && rt.scale > 0.5) { if (++rt.lowFor >= 2) { rt.scale = Math.max(0.5, rt.scale - 0.15); rt.lowFor = 0; sizeCanvas(); } } else rt.lowFor = 0;
   if (fps > 28 && rt.scale < 1) { if (++rt.highFor >= 4) { rt.scale = Math.min(1, rt.scale + 0.1); rt.highFor = 0; sizeCanvas(); } } else rt.highFor = 0;
 }
 function updatePerfInfo() {
   const d = tracker.delegate;
-  $('#perf-info').textContent = `Rendering ${rt.W}×${rt.H} (${Math.round(fx.renderScale * 100)}%) · Face ${d.face || '—'} · Hands ${d.hand || '—'} ${tracker.cpuReason ? `(${tracker.cpuReason}) ` : ''}· Blur: ${FILTER_OK ? 'native filter' : 'fallback'} · MediaPipe ${MP_VERSION}`;
+  $('#perf-info').textContent = `Rendering ${rt.W}×${rt.H} (${Math.round(fx.renderScale * 100)}%${fx.fill ? ', cropped to fill' : ''}) · captures at native resolution · Face ${d.face || '—'} · Hands ${d.hand || '—'} ${tracker.cpuReason ? `(${tracker.cpuReason}) ` : ''}· Blur: ${FILTER_OK ? 'native filter' : 'fallback'} · MediaPipe ${MP_VERSION}`;
 }
 
 /* ------------------------------------------------------------------ main loop */
@@ -211,9 +250,11 @@ function detect(now) {
   if (wantFace) {
     try {
       const r = tracker.detectFace(video);
-      const lm = r?.faceLandmarks?.[0];
-      if (lm && lm.length) { face.update(lm, rt.W, rt.H, rt.mirror); rt.faceOk = true; rt.faceSeenAt = now; fx.faceCount = r.faceLandmarks.length; }
-      else if (now - rt.faceSeenAt > 200) { rt.faceOk = false; fx.faceCount = 0; }
+      const lms = r?.faceLandmarks || [];
+      if (lms.length && lms[0].length) {
+        rt.faceLms = lms; rt.faceN = Math.min(lms.length, state.faces, faces.length);
+        remapFaces(); rt.faceOk = true; rt.faceSeenAt = now; fx.faceCount = lms.length;
+      } else if (now - rt.faceSeenAt > 200) { rt.faceOk = false; rt.faceN = 0; fx.faceCount = 0; }
     } catch (e) { handleDetectError('face', e); }
   }
   const handEvery = state.perf === 'low' ? 3 : 2;
@@ -241,17 +282,23 @@ function drawVideo() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none'; ctx.shadowBlur = 0;
   if (rt.mirror) { ctx.translate(rt.W, 0); ctx.scale(-1, 1); }
-  ctx.drawImage(video, 0, 0, rt.W, rt.H);
+  ctx.drawImage(video, vmap.sx, vmap.sy, vmap.sw, vmap.sh, 0, 0, rt.W, rt.H);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 function renderEffects(ids, t, dt) {
-  env.t = t; env.dt = dt; env.W = rt.W; env.H = rt.H; env.burst = rt.burst; env.burstStart = rt.burstStart; env.tess = tracker.tess; env.fps = rt.fps;
-  const F = rt.faceOk ? face : null;
+  const motion = REDUCED.matches ? 0.3 : 1; // prefers-reduced-motion: slow every JS animation down
+  env.t = t * motion; env.dt = dt * motion; env.W = rt.W; env.H = rt.H; env.burst = REDUCED.matches ? rt.burst * 0.4 : rt.burst;
+  env.burstStart = rt.burstStart * motion; env.tess = tracker.tess; env.fps = rt.fps; env.reduced = REDUCED.matches;
+  const n = rt.faceOk ? rt.faceN : 0;
   for (const id of RENDER_ORDER) {
     if (!ids.has(id)) continue;
-    const effect = EFFECT_MAP[id];
-    if (effect.needsFace && !F) continue;
-    try { effect.render(ctx, F, env, state.settings[id]); }
+    const effect = EFFECT_MAP[id], st = state.settings[id];
+    const perFace = effect.needsFace || st.area === 'face';
+    if (perFace && !n) continue;
+    try {
+      if (perFace) for (let i = 0; i < n; i++) effect.render(ctx, faces[i], env, st);
+      else effect.render(ctx, n ? faces[0] : null, env, st);
+    }
     catch (e) { if (!rt.fxErrors.has(id)) { rt.fxErrors.add(id); logError(`effect ${id}`, e); } }
     finally { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none'; ctx.shadowBlur = 0; }
   }
@@ -261,14 +308,16 @@ function draw(t, dt) {
   renderEffects(enabled, t, dt);
   if (state.debug) drawDebug();
 }
+const BONES = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]];
+const X = (p) => { const x = (p.x * vmap.vw - vmap.sx) * vmap.k; return rt.mirror ? rt.W - x : x; };
+const Y = (p) => (p.y * vmap.vh - vmap.sy) * vmap.k;
 function drawDebug() {
   ctx.save();
-  if (rt.faceOk) { ctx.fillStyle = 'rgba(255,255,255,0.8)'; const p = face.pts; for (let i = 0; i < face.n; i++) ctx.fillRect(p[i * 2] - 1, p[i * 2 + 1] - 1, 2, 2); }
-  const C = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]];
-  ctx.lineWidth = 2; ctx.strokeStyle = '#e8dccf'; ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  if (rt.faceOk) for (let f = 0; f < rt.faceN; f++) { const p = faces[f].pts; for (let i = 0; i < faces[f].n; i++) ctx.fillRect(p[i * 2] - 1, p[i * 2 + 1] - 1, 2, 2); }
+  ctx.lineWidth = 2; ctx.strokeStyle = '#b8b8b8'; ctx.fillStyle = '#ffffff';
   for (const h of rt.hands) {
-    const X = (p) => (rt.mirror ? 1 - p.x : p.x) * rt.W, Y = (p) => p.y * rt.H;
-    ctx.beginPath(); for (const [a, b] of C) { ctx.moveTo(X(h[a]), Y(h[a])); ctx.lineTo(X(h[b]), Y(h[b])); } ctx.stroke();
+    ctx.beginPath(); for (const [a, b] of BONES) { ctx.moveTo(X(h[a]), Y(h[a])); ctx.lineTo(X(h[b]), Y(h[b])); } ctx.stroke();
     for (const p of h) { ctx.beginPath(); ctx.arc(X(p), Y(p), 3, 0, Math.PI * 2); ctx.fill(); }
     const g = classifyHand(h);
     if (g) { ctx.font = '600 14px ui-monospace, monospace'; ctx.fillText(GESTURE_LABELS[g], X(h[0]) + 8, Y(h[0]) + 18); }
@@ -288,7 +337,8 @@ function updateGestureHud(now) {
   const show = state.gestures && rt.hands.length > 0 && gestures.current;
   hud.classList.toggle('show', !!show);
   if (show) {
-    $('#gesture-name').textContent = GESTURE_LABELS[gestures.current] || '—';
+    const label = GESTURE_LABELS[gestures.current] || '—', el = $('#gesture-name');
+    if (el.textContent !== label) el.textContent = label;
     const p = gestures.progress(now);
     $('#hold-ring').style.strokeDashoffset = String(94.25 * (1 - p));
   }
@@ -385,7 +435,8 @@ function renderActive() {
   $('#active-name').textContent = f.name; $('#active-glyph').textContent = f.glyph;
   const sw = $('#btn-active-toggle'); sw.setAttribute('aria-checked', String(enabled.has(f.id))); sw.setAttribute('aria-label', `${f.name} on/off`);
   const ip = f.params.find((p) => p.key === 'intensity');
-  const inp = $('#intensity'); inp.value = s.intensity; $('#intensity-val').textContent = `${s.intensity}%`;
+  const inp = $('#intensity'); inp.value = s.intensity; $('#intensity-val').textContent = `${s.intensity}${ip.unit}`;
+  $('#intensity-label').textContent = ip.label;
   inp.setAttribute('aria-label', `${f.name} – ${ip.label}`); inp.title = ip.label;
   const col = $('#color');
   col.disabled = !f.hasColor; col.parentElement.classList.toggle('disabled', !f.hasColor);
@@ -419,30 +470,42 @@ function renderSettings() {
     form.appendChild(row);
   }
 }
-function openSheet(id) {
-  for (const other of ['settings', 'help']) if (other !== id) closeSheet(other);
+function openSheet(id, returnTo = null) {
+  for (const other of ['settings', 'help']) if (other !== id) closeSheet(other, false);
+  rt.sheetReturn = returnTo; // keyboard users get focus back on the opener; otherwise focus is released
   const el = $('#' + id); el.hidden = false; requestAnimationFrame(() => el.classList.add('open'));
   document.querySelectorAll(`[aria-controls="${id}"]`).forEach((b) => b.setAttribute('aria-expanded', 'true'));
   if (id === 'settings') renderSettings();
   el.querySelector('.sheet-head .icon-btn').focus({ preventScroll: true });
 }
-function closeSheet(id) {
+function closeSheet(id, restore = true) {
   const el = $('#' + id); if (el.hidden) return;
+  if (restore && (el.contains(document.activeElement) || document.activeElement === document.body)) {
+    if (rt.sheetReturn && document.contains(rt.sheetReturn)) rt.sheetReturn.focus({ preventScroll: true });
+    else document.activeElement?.blur?.();
+  }
   el.classList.remove('open'); setTimeout(() => { if (!el.classList.contains('open')) el.hidden = true; }, 260);
   document.querySelectorAll(`[aria-controls="${id}"]`).forEach((b) => b.setAttribute('aria-expanded', 'false'));
 }
-const toggleSheet = (id) => ($('#' + id).hidden ? openSheet(id) : closeSheet(id));
+const toggleSheet = (id, returnTo = null) => ($('#' + id).hidden ? openSheet(id, returnTo) : closeSheet(id));
+/** Opener to restore focus to: only when the button was activated from the keyboard (click detail 0). */
+const kbOpener = (e) => (e && e.detail === 0 ? e.currentTarget : null);
 
 /* ------------------------------------------------------------------ capture */
 function screenshot() {
   if (!rt.running) return;
   const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
+  // render one frame at the full native camera resolution, snapshot it, then restore the preview size
+  const prev = rt.captureFull;
+  if (!prev) { rt.captureFull = true; sizeCanvas(true); draw(performance.now() / 1000, 0); }
+  const w = canvas.width, h = canvas.height;
   canvas.toBlob((blob) => {
     if (!blob) { toast('Screenshot failed'); return; }
     const name = `ar-fx-${stamp()}.png`;
-    fx.lastScreenshot = { name, size: blob.size, type: blob.type, at: Date.now() };
+    fx.lastScreenshot = { name, size: blob.size, type: blob.type, width: w, height: h, at: Date.now() };
     download(blob, name); toast('📸 Screenshot saved');
   }, 'image/png');
+  if (!prev) { rt.captureFull = false; sizeCanvas(true); draw(performance.now() / 1000, 0); }
 }
 function pickMime() {
   if (typeof MediaRecorder === 'undefined') return null;
@@ -454,11 +517,13 @@ function startRecording() {
   if (!rt.running || rt.recorder) return;
   if (!canRecord()) { toast('Recording is not supported in this browser', 3000); return; }
   const mime = pickMime();
+  rt.captureFull = true; sizeCanvas(true); draw(performance.now() / 1000, 0); // record at native resolution
   let rec;
   try {
     const stream = canvas.captureStream(30);
     rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 6_000_000 } : undefined);
-  } catch (e) { logError('record', e); toast('Could not start recording: ' + e.message, 3000); return; }
+  } catch (e) { rt.captureFull = false; sizeCanvas(true); logError('record', e); toast('Could not start recording: ' + e.message, 3000); return; }
+  const recSize = [canvas.width, canvas.height];
   rt.recChunks = [];
   rec.ondataavailable = (e) => { if (e.data && e.data.size) rt.recChunks.push(e.data); };
   rec.onstop = () => {
@@ -466,7 +531,7 @@ function startRecording() {
     const blob = new Blob(rt.recChunks, { type });
     const ext = /mp4/.test(type) ? 'mp4' : 'webm';
     const name = `ar-fx-${stamp()}.${ext}`;
-    fx.lastRecording = { name, size: blob.size, type, duration: (performance.now() - rt.recStart) / 1000, at: Date.now() };
+    fx.lastRecording = { name, size: blob.size, type, width: recSize[0], height: recSize[1], duration: (performance.now() - rt.recStart) / 1000, at: Date.now() };
     if (blob.size) { download(blob, name); toast(`🎬 Video saved (${(blob.size / 1048576).toFixed(1)} MB)`); }
     else toast('Recording was empty');
     rt.recChunks = [];
@@ -484,6 +549,7 @@ function stopRecording() {
   rt.recorder = null; fx.recording = false; clearInterval(rt.recTimer);
   try { if (rec.state !== 'inactive') { rec.requestData?.(); rec.stop(); } } catch (e) { logError('record-stop', e); }
   rec.stream?.getTracks().forEach((t) => t.stop());
+  rt.captureFull = false; if (rt.running) sizeCanvas(true);
   $('#rec-badge').hidden = true; $('#record-label').textContent = 'Record';
   $('#btn-record').classList.remove('recording'); $('#btn-record').setAttribute('aria-pressed', 'false');
 }
@@ -518,29 +584,43 @@ function bind() {
   $('#btn-clear').addEventListener('click', () => { enabled.clear(); persist(); renderLibrary(); renderActive(); toast('All effects off'); });
   $('#btn-fullscreen').addEventListener('click', toggleFullscreen);
   $('#btn-gestures').addEventListener('click', () => { setGestures(!state.gestures); toast(`Gesture controls ${state.gestures ? 'on' : 'off'}`); });
-  $('#btn-help').addEventListener('click', () => toggleSheet('help'));
-  $('#btn-help-idle').addEventListener('click', () => openSheet('help'));
-  $('#btn-settings').addEventListener('click', () => toggleSheet('settings'));
+  $('#btn-help').addEventListener('click', (e) => toggleSheet('help', kbOpener(e)));
+  $('#btn-help-idle').addEventListener('click', (e) => openSheet('help', kbOpener(e)));
+  $('#btn-settings').addEventListener('click', (e) => toggleSheet('settings', kbOpener(e)));
   document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => closeSheet(b.dataset.close)));
   $('#btn-active-toggle').addEventListener('click', () => toggleEffect());
-  $('#intensity').addEventListener('input', (e) => { const v = +e.target.value; $('#intensity-val').textContent = `${v}%`; setSetting(state.active, 'intensity', v); syncSettingsField('intensity', v); });
+  $('#intensity').addEventListener('input', (e) => { const v = +e.target.value; $('#intensity-val').textContent = `${v}${EFFECT_MAP[state.active].params[0].unit}`; setSetting(state.active, 'intensity', v); syncSettingsField('intensity', v); });
   $('#color').addEventListener('input', (e) => { setSetting(state.active, 'color', e.target.value); syncSettingsField('color', e.target.value); });
   $('#btn-reset-fx').addEventListener('click', () => { state.settings[state.active] = defaultSettings(state.active); persist(); renderActive(); renderSettings(); toast('Effect reset'); });
   $('#btn-reset-all').addEventListener('click', () => {
     if (!confirm('Reset every effect and studio setting to the defaults?')) return;
     for (const f of EFFECTS) state.settings[f.id] = defaultSettings(f.id);
-    enabled.clear(); enabled.add('neon'); state.active = 'neon'; state.mirror = 'auto'; state.perf = 'auto'; state.debug = false;
+    enabled.clear(); enabled.add('neon'); state.active = 'neon'; state.mirror = 'auto'; state.perf = 'auto'; state.debug = false; state.fit = 'auto'; state.faces = 2;
     setGestures(true); saveNow(state); applyStudioControls(); renderLibrary(); renderActive(); renderSettings(); toast('All settings reset');
   });
-  $('#opt-mirror').addEventListener('change', (e) => { state.mirror = e.target.value; persist(); rt.mirror = state.mirror === 'on' || (state.mirror === 'auto' && camera.facing !== 'environment'); });
+  $('#opt-mirror').addEventListener('change', (e) => { state.mirror = e.target.value; persist(); rt.mirror = state.mirror === 'on' || (state.mirror === 'auto' && camera.facing !== 'environment'); if (rt.running) sizeCanvas(true); });
   $('#opt-perf').addEventListener('change', (e) => { state.perf = e.target.value; persist(); if (state.perf === 'auto') rt.scale = 1; sizeCanvas(true); });
   $('#opt-debug').addEventListener('change', (e) => { state.debug = e.target.checked; persist(); });
+  $('#opt-fit').addEventListener('change', (e) => { state.fit = e.target.value; persist(); if (rt.running) sizeCanvas(true); });
+  $('#opt-faces').addEventListener('change', async (e) => { state.faces = +e.target.value; persist(); await tracker.setNumFaces(state.faces).catch((err) => logError('faces', err)); });
   $('#opt-gestures').addEventListener('change', (e) => setGestures(e.target.checked));
   $('#btn-retry-load').addEventListener('click', loadEngine);
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeSheet('settings'); closeSheet('help'); return; }
-    const tag = (e.target.tagName || '').toLowerCase();
+    // focus trap inside an open sheet
+    const open = ['settings', 'help'].map((i) => $('#' + i)).find((el) => !el.hidden);
+    if (e.key === 'Tab' && open) {
+      const f = [...open.querySelectorAll('button, input, select, [tabindex]:not([tabindex="-1"])')].filter((x) => !x.disabled && x.offsetParent !== null);
+      if (f.length) {
+        const i = f.indexOf(document.activeElement);
+        if (i === -1 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) { e.preventDefault(); f[e.shiftKey ? f.length - 1 : 0].focus(); }
+      }
+      return;
+    }
+    // ignore keys from elements that are hidden (e.g. a closed sheet's button that kept focus)
+    if (e.target !== document.body && e.target.closest?.('[hidden]')) e.target.blur();
+    const tag = (document.activeElement?.tagName || '').toLowerCase();
     if (['input', 'select', 'textarea'].includes(tag) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (tag === 'button' && (e.key === ' ' || e.key === 'Enter')) return;
     const k = e.key.toLowerCase();
@@ -561,14 +641,20 @@ function bind() {
     else if (rt.running) { rt.lastVideoTime = -1; startLoop(); }
   });
   window.addEventListener('pagehide', () => saveNow(state));
+  window.addEventListener('resize', measureChrome);
+  window.addEventListener('orientationchange', () => setTimeout(measureChrome, 250));
+  if ('ResizeObserver' in window) { const ro = new ResizeObserver(measureChrome); ro.observe($('.topbar')); ro.observe($('.dock')); }
 }
 function syncSettingsField(key, v) {
   if ($('#settings').hidden) return;
   const el = document.getElementById(`set-${state.active}-${key}`); if (!el) return;
-  el.value = v; const out = el.parentElement.querySelector('output'); if (out) out.textContent = v + (key === 'intensity' ? '%' : '');
+  el.value = v; const out = el.parentElement.querySelector('output');
+  const unit = EFFECT_MAP[state.active].params.find((p) => p.key === key)?.unit || '';
+  if (out) out.textContent = v + unit;
 }
 function applyStudioControls() {
   $('#opt-mirror').value = state.mirror; $('#opt-perf').value = state.perf; $('#opt-debug').checked = state.debug;
+  $('#opt-fit').value = state.fit; $('#opt-faces').value = String(state.faces);
   setGestures(state.gestures);
 }
 
@@ -577,10 +663,20 @@ function applyStudioControls() {
 // and measure how many pixels inside the face region changed.
 fx.test = {
   faceRect() { return rt.faceOk ? { x: face.minX, y: face.minY, w: face.w, h: face.h } : null; },
+  faceRects() { return rt.faceOk ? faces.slice(0, rt.faceN).map((f) => ({ x: f.minX, y: f.minY, w: f.w, h: f.h })) : []; },
+  vmap: () => ({ ...vmap }),
+  /** alpha profile (0..255) across the middle row of the last Mirror Distortion output buffer */
+  mirrorAlphaProfile(samples = 41) {
+    const c = getBuffer('mirOut'), r = EFFECT_MAP.mirror.lastRect; if (!c || !r) return null;
+    const row = c.getContext('2d').getImageData(0, Math.round(r.fy), r.w, 1).data, out = [];
+    for (let i = 0; i < samples; i++) out.push(row[Math.min(r.w - 1, Math.round((i / (samples - 1)) * (r.w - 1))) * 4 + 3]);
+    return out;
+  },
+  gestureController: gestures,
   diffEffect(id, settings, pad = 0) {
     if (!rt.faceOk) return { error: 'no face' };
     // region: the face box (optionally padded) or, with pad === 'eyes', just the eye area
-    const reg = pad === 'eyes' ? face.bbox([...IDX.eyeR, ...IDX.eyeL], 0.25)
+    const reg = typeof pad === 'object' && pad ? pad : pad === 'eyes' ? face.bbox([...IDX.eyeR, ...IDX.eyeL], 0.25)
       : { x: face.minX - face.w * pad, y: face.minY - face.h * pad, w: face.w * (1 + 2 * pad), h: face.h * (1 + 2 * pad) };
     const x = Math.max(0, Math.floor(reg.x)), y = Math.max(0, Math.floor(reg.y));
     const w = Math.min(rt.W - x, Math.ceil(reg.w)), h = Math.min(rt.H - y, Math.ceil(reg.h));
@@ -603,5 +699,5 @@ fx.test = {
 };
 
 /* ------------------------------------------------------------------ boot */
-bind(); applyStudioControls(); renderLibrary(); renderActive(); syncDebug();
+bind(); applyStudioControls(); renderLibrary(); renderActive(); syncDebug(); measureChrome(); syncFs();
 loadEngine();

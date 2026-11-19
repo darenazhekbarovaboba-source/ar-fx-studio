@@ -27,6 +27,8 @@ export function loadState() {
     debug: !!saved.debug,
     mirror: ['auto', 'on', 'off'].includes(saved.mirror) ? saved.mirror : 'auto',
     perf: ['auto', 'high', 'low'].includes(saved.perf) ? saved.perf : 'auto',
+    fit: ['auto', 'fill', 'fit'].includes(saved.fit) ? saved.fit : 'auto',
+    faces: [1, 2, 3].includes(saved.faces) ? saved.faces : 2,
   };
 }
 
@@ -36,7 +38,7 @@ export function saveState(state) {
   timer = setTimeout(() => saveNow(state), 150);
 }
 export function saveNow(state) {
-  const { settings, enabled, active, gestures, debug, mirror, perf } = state;
-  try { localStorage.setItem(KEY, JSON.stringify({ settings, enabled, active, gestures, debug, mirror, perf })); } catch {}
+  const { settings, enabled, active, gestures, debug, mirror, perf, fit, faces } = state;
+  try { localStorage.setItem(KEY, JSON.stringify({ settings, enabled, active, gestures, debug, mirror, perf, fit, faces })); } catch {}
 }
 export const STORAGE_KEY = KEY;

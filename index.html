@@ -19,7 +19,7 @@
     <canvas id="out" aria-label="Camera output with effects"></canvas>
     <video id="video" playsinline muted aria-hidden="true"></video>
     <div id="flash" aria-hidden="true"></div>
-    <div id="gesture-hud" aria-hidden="true"><svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15"/><circle id="hold-ring" class="ring" cx="18" cy="18" r="15"/></svg><span id="gesture-name">—</span></div>
+    <div id="gesture-hud"><svg viewBox="0 0 36 36" aria-hidden="true"><circle class="track" cx="18" cy="18" r="15"/><circle id="hold-ring" class="ring" cx="18" cy="18" r="15"/></svg><span class="sr-only">Gesture detected: </span><span id="gesture-name" role="status" aria-live="polite" aria-atomic="true">—</span></div>
     <div id="toast" role="status" aria-live="polite"></div>
     <div id="rec-badge" hidden><span class="dot"></span><span id="rec-time">00:00</span></div>
 
@@ -57,7 +57,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 114 2c-1 .7-1.5 1.2-1.5 2.5M12 17h.01"/></svg>
         <span class="sr-only">Gesture guide</span>
       </button>
-      <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen (F)">
+      <button id="btn-fullscreen" class="icon-btn" type="button" title="Fullscreen (F)" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
         <span class="sr-only">Fullscreen</span>
       </button>
@@ -68,7 +68,7 @@
     <div class="dock-row active-row">
       <button id="btn-active-toggle" class="switch" type="button" role="switch" aria-checked="false" title="Turn the selected effect on/off"><span></span></button>
       <div class="active-name"><span id="active-glyph" aria-hidden="true">◎</span><span id="active-name">Neon Face</span></div>
-      <label class="slider-wrap"><span class="sr-only">Intensity</span>
+      <label class="slider-wrap"><span class="sr-only" id="intensity-label">Intensity</span>
         <input id="intensity" type="range" min="0" max="100" step="1" value="60" aria-label="Effect intensity">
         <output id="intensity-val">60%</output>
       </label>
@@ -105,6 +105,8 @@
       <hr class="divider">
       <h3>Studio</h3>
       <div class="field"><label for="opt-mirror">Mirror preview</label><select id="opt-mirror"><option value="auto">Auto (front camera)</option><option value="on">Always</option><option value="off">Never</option></select></div>
+      <div class="field"><label for="opt-fit">Preview framing</label><select id="opt-fit"><option value="auto">Auto (fill the screen when orientations differ)</option><option value="fill">Fill screen (crop edges)</option><option value="fit">Show whole frame</option></select></div>
+      <div class="field"><label for="opt-faces">Faces to track</label><select id="opt-faces"><option value="1">1 face</option><option value="2">Up to 2 faces</option><option value="3">Up to 3 faces</option></select></div>
       <div class="field"><label for="opt-perf">Performance</label><select id="opt-perf"><option value="auto">Auto (adaptive resolution)</option><option value="high">High quality</option><option value="low">Battery saver</option></select></div>
       <div class="field row"><label for="opt-debug">Show tracking landmarks</label><input id="opt-debug" type="checkbox" class="tgl"></div>
       <div class="field row"><label for="opt-gestures">Gesture controls</label><input id="opt-gestures" type="checkbox" class="tgl"></div>

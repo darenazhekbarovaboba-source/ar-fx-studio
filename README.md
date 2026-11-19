@@ -8,12 +8,14 @@ Plain HTML5 / CSS3 / JavaScript (ES modules). No frameworks, no build step, no s
 
 ## Features
 
-- Live camera (WebRTC `getUserMedia`), front/back switching when the device has more than one camera, mirrored selfie preview
+- Live camera (WebRTC `getUserMedia`), front/back switching (several cameras, or front/back `facingMode` on phones), mirrored selfie preview
+- Preview fills portrait phone screens (crops the camera frame; effects stay locked to the face) — or shows the whole frame, selectable in settings
+- Tracks up to 3 faces (default 2): face effects are applied to every tracked face
 - Real face tracking + real hand tracking (MediaPipe Tasks Vision `@mediapipe/tasks-vision@1.2.3`, VIDEO mode, GPU delegate with automatic CPU fallback)
 - 12 effects that can be stacked; each has its own persisted settings (intensity, speed, color, size, opacity, animation speed — whichever apply)
 - Gesture controls with hold-to-confirm, cooldown and an on-screen hold ring + toast; can be switched off
-- Screenshot (PNG), video recording (MP4 or WebM, whichever the browser supports) with timer, fullscreen
-- Loading screen with real download progress for the runtime and both models; clear errors and Retry for permission denied, no camera, camera in use, insecure (non-HTTPS) page and model download failures
+- Screenshot (PNG) and video recording (MP4 or WebM, whichever the browser supports) at the camera's full native resolution, even when the live preview is running at reduced resolution; fullscreen
+- Loading screen with real download progress for the runtime and both models; downloads time out (no data for 20 s, or 2 min total) instead of hanging; clear errors and Retry for permission denied, no camera, camera in use, unsupported camera mode, insecure (non-HTTPS) page and model/CDN failures
 - FPS / face / hand / backend status, adaptive render resolution when FPS drops, processing paused while the tab is hidden
 - Optional landmark debug overlay; keyboard shortcuts; mobile-first responsive layout
 
@@ -39,6 +41,8 @@ Tap an effect to select it and turn it on; tap the selected effect again to turn
 ## Gestures
 
 Hold a gesture for ~0.4 s (a ring fills while it is recognised). Each gesture fires once, then must be released.
+
+With two hands in view, a clear one-hand gesture (fist, two/three fingers, pinch) from either hand still works; otherwise two hands count as **Both hands**. Both hands fires once and stays latched until your hands leave the frame (or you keep just one hand up for ~0.7 s), so tracking flicker cannot re-trigger it; it also has a 2.5 s cooldown.
 
 | Gesture | Action |
 |---------|--------|
@@ -75,7 +79,7 @@ npx serve .            # or: python3 -m http.server 8080
 
 Opening `index.html` directly from disk (`file://`) will not work because ES modules and the camera need an http(s) origin.
 
-URL options: `?cpu=1` forces the CPU backend, `?gpu=1` forces the GPU backend, `?manualblur=1` forces the blur fallback.
+URL options: `?cpu=1` forces the CPU backend, `?gpu=1` forces the GPU backend, `?manualblur=1` forces the blur fallback, `?timeout=<ms>` shortens download timeouts (testing).
 
 ### Tests
 
@@ -114,6 +118,8 @@ tests/              Unit tests for gestures
 ## Known limitations
 
 - Head pose (yaw / pitch / roll) is estimated from 2D landmarks, so it is approximate.
-- Tracks one face (the effects are built for a single subject) and up to two hands.
+- Faces that are small in the frame (roughly under 1/10 of the frame width) may not be detected; the face detector is a short-range model.
+- "Fill screen" crops the camera frame, so a face near the left/right edge of a landscape camera can fall outside a portrait preview; captures match what you see.
+- Respects `prefers-reduced-motion` by slowing all effect animation and disabling strobe/flash bursts.
 - Speed depends on the device; low-end phones may run at reduced resolution (adaptive) or lower FPS.
 - Front/back switching needs a device that exposes more than one camera.

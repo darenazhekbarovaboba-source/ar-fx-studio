@@ -21,13 +21,18 @@ export class Face {
     this.cx = 0; this.cy = 0; this.w = 0; this.h = 0;
     this.roll = 0; this.yaw = 0; this.pitch = 0;
   }
-  update(lm, W, H, mirror) {
+  /**
+   * @param lm normalized landmarks (video space)
+   * @param m  mapping video → canvas: { vw, vh, sx, sy, k, W, mirror }. The canvas shows the
+   *           video crop (sx, sy, …) scaled by k, optionally mirrored horizontally.
+   */
+  update(lm, m) {
     const n = Math.min(lm.length, 478); this.n = n;
     const p = this.pts;
     let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
     for (let i = 0; i < n; i++) {
-      const x = (mirror ? 1 - lm[i].x : lm[i].x) * W, y = lm[i].y * H;
-      p[i * 2] = x; p[i * 2 + 1] = y;
+      let x = (lm[i].x * m.vw - m.sx) * m.k; if (m.mirror) x = m.W - x;
+      p[i * 2] = x; p[i * 2 + 1] = (lm[i].y * m.vh - m.sy) * m.k;
     }
     for (const i of IDX.oval) {
       const x = p[i * 2], y = p[i * 2 + 1];

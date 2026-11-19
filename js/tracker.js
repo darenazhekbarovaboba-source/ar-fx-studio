@@ -6,9 +6,29 @@ export const MODELS = {
   hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
 };
 
-/** Download a file with real byte progress. */
-async function fetchWithProgress(url, onProgress) {
-  const res = await fetch(url, { mode: 'cors' });
+const timeoutError = (what, ms) => Object.assign(new Error(`${what} timed out after ${Math.round(ms / 1000)} s`), { name: 'TimeoutError' });
+/** Reject if `promise` does not settle within `ms` (for steps that cannot be aborted, e.g. import()). */
+function withTimeout(promise, ms, what) {
+  let t; return Promise.race([promise, new Promise((_, rej) => { t = setTimeout(() => rej(timeoutError(what, ms)), ms); })]).finally(() => clearTimeout(t));
+}
+
+/**
+ * Download a file with real byte progress. Aborted (AbortController) when no bytes arrive for
+ * `stallMs`, or when the whole download exceeds `totalMs`.
+ */
+async function fetchWithProgress(url, onProgress, { stallMs = 20000, totalMs = 120000 } = {}) {
+  const ctl = new AbortController(); let reason = null;
+  const abort = (why) => { reason = why; ctl.abort(); };
+  let stall = setTimeout(() => abort(`no data for ${Math.round(stallMs / 1000)} s`), stallMs);
+  const total = setTimeout(() => abort(`download took longer than ${Math.round(totalMs / 1000)} s`), totalMs);
+  const kick = () => { clearTimeout(stall); stall = setTimeout(() => abort(`no data for ${Math.round(stallMs / 1000)} s`), stallMs); };
+  try { return await fetchInner(url, onProgress, ctl.signal, kick); }
+  catch (e) { if (reason) throw Object.assign(new Error(`timed out: ${reason}`), { name: 'TimeoutError' }); throw e; }
+  finally { clearTimeout(stall); clearTimeout(total); }
+}
+async function fetchInner(url, onProgress, signal, kick) {
+  const res = await fetch(url, { mode: 'cors', signal });
+  kick();
   if (!res.ok) throw new Error(`HTTP ${res.status} while downloading ${url.split('/').pop()}`);
   const total = Number(res.headers.get('content-length')) || 0;
   if (!res.body || !res.body.getReader) { const b = new Uint8Array(await res.arrayBuffer()); onProgress(1, b.length, b.length); return b; }
@@ -16,7 +36,7 @@ async function fetchWithProgress(url, onProgress) {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value); got += value.length;
+    chunks.push(value); got += value.length; kick();
     onProgress(total ? got / total : 0, got, total);
   }
   const out = new Uint8Array(got); let o = 0;
@@ -46,11 +66,14 @@ export class Tracker {
     this.cpuReason = this.forceCPU ? 'forced (?cpu=1)' : null;
   }
   /** @param {(stage:string, progress:number, info?:string)=>void} onStage */
-  async load(onStage) {
+  async load(onStage, opts = {}) {
+    this.numFaces = opts.numFaces || 1;
+    const T = opts.timeoutMs || 0; // test knob (?timeout=ms); defaults below are for real networks
+    this.timeouts = { cdn: T || 30000, stall: T || 20000, total: T ? T * 4 : 120000, init: T ? T * 2 : 60000 };
     onStage('wasm', 0, 'Loading vision runtime');
     let mod;
-    try { mod = await import(`${CDN}/vision_bundle.mjs`); }
-    catch (e) { throw Object.assign(new Error('Could not load the MediaPipe library from the CDN. Check your connection or content blockers.'), { code: 'cdn', cause: e }); }
+    try { mod = this.mod || await withTimeout(import(`${CDN}/vision_bundle.mjs`), this.timeouts.cdn, 'MediaPipe library download'); }
+    catch (e) { throw Object.assign(new Error(`Could not load the MediaPipe library from the CDN${e.name === 'TimeoutError' ? ' (it timed out)' : ''}. Check your connection or content blockers.`), { code: 'cdn', cause: e }); }
     this.mod = mod;
     this.vision = await mod.FilesetResolver.forVisionTasks(`${CDN}/wasm`);
     onStage('wasm', 1, 'Runtime ready');
@@ -61,14 +84,14 @@ export class Tracker {
     let faceBuf, handBuf;
     try {
       [faceBuf, handBuf] = await Promise.all([
-        fetchWithProgress(MODELS.face, (p, g, t) => onStage('face', p * 0.9, fmt(g, t))),
-        fetchWithProgress(MODELS.hand, (p, g, t) => onStage('hand', p * 0.9, fmt(g, t))),
+        fetchWithProgress(MODELS.face, (p, g, t) => onStage('face', p * 0.9, fmt(g, t)), { stallMs: this.timeouts.stall, totalMs: this.timeouts.total }),
+        fetchWithProgress(MODELS.hand, (p, g, t) => onStage('hand', p * 0.9, fmt(g, t)), { stallMs: this.timeouts.stall, totalMs: this.timeouts.total }),
       ]);
     } catch (e) { throw Object.assign(new Error(`Could not download the face/hand models (${String(e.message || e).replace(/\.$/, '')}).`), { code: 'model', cause: e }); }
 
     onStage('face', 0.92, 'Initialising face tracker');
     this.face = await this._create(mod.FaceLandmarker, faceBuf, (d) => ({
-      runningMode: 'VIDEO', numFaces: 1, minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+      runningMode: 'VIDEO', numFaces: this.numFaces, minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
       outputFaceBlendshapes: false, outputFacialTransformationMatrixes: false,
     }), 'face');
     onStage('face', 1, `Ready (${this.delegate.face})`);
@@ -80,7 +103,7 @@ export class Tracker {
     this.bufs = { face: faceBuf, hand: handBuf };
   }
   async _create(Cls, buffer, opts, key) {
-    const tryWith = (delegate) => Cls.createFromOptions(this.vision, { baseOptions: { modelAssetBuffer: buffer, delegate }, ...opts(delegate) });
+    const tryWith = (delegate) => withTimeout(Cls.createFromOptions(this.vision, { baseOptions: { modelAssetBuffer: buffer, delegate }, ...opts(delegate) }), this.timeouts.init, `${key} tracker start-up`);
     if (!this.forceCPU && !this.forceGPU && this._sw === undefined) {
       this._sw = softwareGL();
       if (this._sw) this.cpuReason = `software WebGL (${this._sw}) — CPU is faster`;
@@ -97,11 +120,12 @@ export class Tracker {
     try { this[key]?.close(); } catch {}
     this[key] = null;
     const opts = key === 'face'
-      ? { runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: false }
+      ? { runningMode: 'VIDEO', numFaces: this.numFaces, outputFaceBlendshapes: false }
       : { runningMode: 'VIDEO', numHands: 2 };
     this[key] = await Cls.createFromOptions(this.vision, { baseOptions: { modelAssetBuffer: this.bufs[key], delegate: 'CPU' }, ...opts });
     this.delegate[key] = 'CPU';
   }
+  async setNumFaces(n) { this.numFaces = n; if (this.face) await this.face.setOptions({ numFaces: n }); }
   _ts() { const t = performance.now(); this.lastTs = t > this.lastTs ? t : this.lastTs + 0.01; return this.lastTs; }
   detectFace(video) { return this.face ? this.face.detectForVideo(video, this._ts()) : null; }
   detectHands(video) { return this.hand ? this.hand.detectForVideo(video, this._ts()) : null; }

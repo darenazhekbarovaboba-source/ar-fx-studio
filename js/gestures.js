@@ -63,70 +63,109 @@ export function classifyHand(lm) {
   return null;
 }
 
-/** Classify a frame (array of hands). Two hands visible => both_hands. */
-export function classifyFrame(hands) {
-  if (!hands || hands.length === 0) return null;
-  if (hands.length >= 2) return GESTURES.BOTH;
-  return classifyHand(hands[0]);
+/** One-hand gestures that may come from a "primary" hand while two hands are visible. */
+const DISTINCT = new Set([GESTURES.FIST, GESTURES.TWO, GESTURES.THREE, GESTURES.PINCH]);
+
+/**
+ * Classify a frame (array of hands) and report which hand produced the gesture.
+ * Two hands visible => both_hands, unless one hand (the primary hand) is clearly making a
+ * distinct one-hand gesture (fist / two / three / pinch) — then that gesture wins, so
+ * one-hand controls keep working with a second hand in view.
+ * @returns {{gesture: string|null, hand: number}}
+ */
+export function classifyFrameDetailed(hands) {
+  const valid = (hands || []).filter((h) => h && h.length >= 21);
+  if (valid.length === 0) return { gesture: null, hand: -1 };
+  if (valid.length === 1) return { gesture: classifyHand(valid[0]), hand: hands.indexOf(valid[0]) };
+  const g0 = classifyHand(valid[0]), g1 = classifyHand(valid[1]);
+  const d0 = DISTINCT.has(g0), d1 = DISTINCT.has(g1);
+  if (d0 && !d1) return { gesture: g0, hand: hands.indexOf(valid[0]) };
+  if (d1 && !d0) return { gesture: g1, hand: hands.indexOf(valid[1]) };
+  if (d0 && d1 && g0 === g1) return { gesture: g0, hand: hands.indexOf(valid[0]) };
+  return { gesture: GESTURES.BOTH, hand: -1 };
 }
+
+/** Classify a frame; returns just the gesture name (see classifyFrameDetailed). */
+export function classifyFrame(hands) { return classifyFrameDetailed(hands).gesture; }
 
 /**
  * Debounced gesture controller. Feed it hands per detection; it returns events.
- * One-shot gestures fire once after being held `holdMs`, then must be released
- * before they can fire again; a global cooldown separates one-shot events.
- * Pinch is continuous: it emits `pinch_move` with the vertical delta.
+ * - One-shot gestures fire once after being held `holdMs`, then must be released for
+ *   `releaseMs` before they can fire again. Each gesture also has its own cooldown, and a
+ *   global cooldown separates any two one-shot events.
+ * - both_hands is latched: after it fires it stays "held" while at least one hand is still
+ *   visible, so tracking flicker (2 → 1 → 2 hands) cannot re-fire it. The latch clears when
+ *   all hands are gone for `bothReleaseMs`, or when a single hand has been alone for
+ *   `bothSoloMs` (the user deliberately dropped one hand). While latched, other one-shot
+ *   gestures are suppressed.
+ * - Pinch is continuous: it emits `pinch_move` with the vertical delta of the pinching hand.
  */
 export class GestureController {
   constructor(opts = {}) {
     this.holdMs = opts.holdMs ?? 400;
     this.pinchHoldMs = opts.pinchHoldMs ?? 220;
     this.cooldownMs = opts.cooldownMs ?? 800;
-    this.releaseMs = opts.releaseMs ?? 150;
+    this.releaseMs = opts.releaseMs ?? 250;
+    this.bothReleaseMs = opts.bothReleaseMs ?? 900;
+    this.bothSoloMs = opts.bothSoloMs ?? 700;
+    this.perGestureCooldown = { both_hands: 2500, ...(opts.perGestureCooldown || {}) };
     this.reset();
   }
   reset() {
     this.candidate = null; this.since = 0; this.fired = null; this.lastFire = -1e9;
     this.noneSince = 0; this.pinching = false; this.pinchStartY = 0; this.current = null;
+    this.lastFireBy = {}; this.bothLatched = false; this.emptySince = 0; this.soloSince = 0; this.hand = -1;
   }
   /** @returns {Array<{type:string, gesture?:string, dy?:number, y?:number}>} */
   update(hands, now) {
     const events = [];
-    const g = classifyFrame(hands);
-    this.current = g;
+    const n = (hands || []).filter((h) => h && h.length >= 21).length;
+    const { gesture: g, hand } = classifyFrameDetailed(hands);
+    this.current = g; this.hand = hand;
     if (g !== this.candidate) { this.candidate = g; this.since = now; }
     const held = now - this.since;
 
-    // release tracking: allow re-fire after the fired gesture has been gone for releaseMs
-    if (this.fired && g !== this.fired) {
+    // both_hands latch (hysteresis against 2→1 hand flicker)
+    if (this.bothLatched) {
+      if (n === 0) { if (!this.emptySince) this.emptySince = now; } else this.emptySince = 0;
+      if (n === 1) { if (!this.soloSince) this.soloSince = now; } else this.soloSince = 0;
+      if ((this.emptySince && now - this.emptySince >= this.bothReleaseMs) || (this.soloSince && now - this.soloSince >= this.bothSoloMs)) {
+        this.bothLatched = false; this.emptySince = this.soloSince = 0;
+        if (this.fired === GESTURES.BOTH) this.fired = null;
+        this.since = now; // a gesture must be held afresh after the latch ends
+      }
+    }
+
+    // release tracking for ordinary gestures
+    if (this.fired && this.fired !== GESTURES.BOTH && g !== this.fired) {
       if (!this.noneSince) this.noneSince = now;
       if (now - this.noneSince >= this.releaseMs) { this.fired = null; this.noneSince = 0; }
     } else this.noneSince = 0;
 
     // pinch (continuous)
-    if (g === GESTURES.PINCH && held >= this.pinchHoldMs) {
-      const lm = hands[0];
+    if (g === GESTURES.PINCH && held >= this.pinchHoldMs && !this.bothLatched) {
+      const lm = hands[hand];
       const y = (lm[4].y + lm[8].y) / 2;
-      if (!this.pinching) {
-        this.pinching = true; this.pinchStartY = y;
-        events.push({ type: 'pinch_start', gesture: g, y });
-      } else {
-        events.push({ type: 'pinch_move', gesture: g, y, dy: this.pinchStartY - y });
-      }
+      if (!this.pinching) { this.pinching = true; this.pinchStartY = y; events.push({ type: 'pinch_start', gesture: g, y }); }
+      else events.push({ type: 'pinch_move', gesture: g, y, dy: this.pinchStartY - y });
     } else if (this.pinching && g !== GESTURES.PINCH) {
       this.pinching = false;
       events.push({ type: 'pinch_end', gesture: GESTURES.PINCH });
     }
 
-    if (g && g !== GESTURES.PINCH && held >= this.holdMs && this.fired !== g && now - this.lastFire >= this.cooldownMs) {
-      this.fired = g; this.lastFire = now;
+    const own = this.perGestureCooldown[g] ?? 0;
+    if (g && g !== GESTURES.PINCH && held >= this.holdMs && this.fired !== g && !this.bothLatched
+        && now - this.lastFire >= this.cooldownMs && now - (this.lastFireBy[g] ?? -1e9) >= own) {
+      this.fired = g; this.lastFire = now; this.lastFireBy[g] = now;
+      if (g === GESTURES.BOTH) { this.bothLatched = true; this.emptySince = this.soloSince = 0; }
       events.push({ type: 'gesture', gesture: g });
     }
     return events;
   }
   /** 0..1 hold progress for the current candidate (for UI feedback). */
   progress(now) {
-    if (!this.candidate || this.candidate === this.fired) return 0;
+    if (!this.candidate || this.candidate === this.fired || this.bothLatched) return 0;
     const need = this.candidate === GESTURES.PINCH ? this.pinchHoldMs : this.holdMs;
-    return Math.min(1, (now - this.since) / need);
+    return Math.max(0, Math.min(1, (now - this.since) / need));
   }
 }
